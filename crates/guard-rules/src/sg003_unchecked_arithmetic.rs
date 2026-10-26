@@ -45,6 +45,7 @@ impl Rule for UncheckedArithmetic {
         for (_, f) in cx.model.fns_in_file(cx.file_idx) {
             let mut v = ArithVisitor {
                 amount_words: &amount_words,
+                derived: derived_amounts(f, &amount_words),
                 wide_params: wide_int_params(f),
                 overflow_checks,
                 function: &f.name,
@@ -115,8 +116,59 @@ fn wide_int_params(f: &guard_parser::FnDef<'_>) -> HashSet<String> {
         .collect()
 }
 
+/// Locals whose initializer is an amount: an amount-named value or call
+/// (`read_balance(&e)`), an `i128`/`u128` parameter, another such local, or
+/// arithmetic on one (`let x = a * 2`). Computed to a fixpoint.
+fn derived_amounts(f: &guard_parser::FnDef<'_>, amount_words: &[String]) -> HashSet<String> {
+    fn is_amount(e: &Expr, words: &[String], known: &HashSet<String>) -> bool {
+        match guard_parser::syntax::strip(e) {
+            Expr::Binary(b) if op_info(&b.op).is_some() || matches!(b.op, BinOp::Div(_)) => {
+                is_amount(&b.left, words, known) || is_amount(&b.right, words, known)
+            }
+            Expr::MethodCall(m)
+                if m.method.to_string().starts_with("checked_") || m.method.to_string().starts_with("saturating_") =>
+            {
+                is_amount(&m.receiver, words, known)
+            }
+            Expr::MethodCall(m)
+                if matches!(m.method.to_string().as_str(), "unwrap" | "expect" | "unwrap_or" | "unwrap_or_default") =>
+            {
+                is_amount(&m.receiver, words, known)
+            }
+            other => {
+                if is_literal(other) {
+                    return false;
+                }
+                operand_name(other)
+                    .is_some_and(|n| !is_constant_name(&n) && (has_word(&n, words) || known.contains(&n)))
+            }
+        }
+    }
+    let bindings = guard_parser::syntax::Bindings::collect(f.block);
+    let mut known = wide_int_params(f);
+    let params = known.clone();
+    let mut derived = HashSet::new();
+    for _ in 0..6 {
+        let mut changed = false;
+        for (name, init) in bindings.iter() {
+            if !known.contains(name) && is_amount(init, amount_words, &known) {
+                known.insert(name.to_string());
+                derived.insert(name.to_string());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    derived.retain(|n| !params.contains(n));
+    derived
+}
+
 struct ArithVisitor<'a> {
     amount_words: &'a [String],
+    /// Locals derived from amounts (see [`derived_amounts`]); inferred, so medium confidence at most.
+    derived: HashSet<String>,
     /// `i128`/`u128` parameters: treated as amounts even without an amount-like name.
     wide_params: HashSet<String>,
     overflow_checks: Option<bool>,
@@ -129,7 +181,7 @@ struct ArithVisitor<'a> {
 
 impl ArithVisitor<'_> {
     /// The operand's name if it looks like a token amount, and whether that is
-    /// only inferred from its `i128`/`u128` parameter type.
+    /// only inferred (from an `i128`/`u128` parameter type or a local's initializer).
     fn amount_operand(&self, e: &Expr) -> Option<(String, bool)> {
         if is_literal(e) {
             return None;
@@ -141,8 +193,8 @@ impl ArithVisitor<'_> {
         if has_word(&name, self.amount_words) {
             return Some((name, false));
         }
-        let is_param = matches!(guard_parser::syntax::strip(e), Expr::Path(p) if p.path.segments.len() == 1);
-        (is_param && self.wide_params.contains(&name)).then_some((name, true))
+        let is_local = matches!(guard_parser::syntax::strip(e), Expr::Path(p) if p.path.segments.len() == 1);
+        (is_local && (self.wide_params.contains(&name) || self.derived.contains(&name))).then_some((name, true))
     }
 }
 
@@ -341,6 +393,19 @@ fn h(amount: i128) -> u128 { if amount > 0 { amount as u128 } else { 0 } }
         assert_eq!(lines(&f), vec![1]);
         assert_eq!(f[0].confidence, Confidence::Medium);
         assert!(f[0].message.contains("`a`"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn tracks_amounts_through_locals() {
+        let f = check(
+            r#"
+fn a(e: &Env) -> i128 { let x = read_balance(e); let y = x * 3; y + 1 }
+fn b(items: Vec<u32>) -> u32 { let n = items.len(); n + 1 }
+fn c(e: &Env) -> i128 { let x = read_balance(e).checked_add(1).unwrap(); x - 2 }
+"#,
+        );
+        assert_eq!(lines(&f), vec![2, 2, 4], "{f:#?}");
+        assert!(f.iter().all(|x| x.confidence == Confidence::Medium));
     }
 
     #[test]
