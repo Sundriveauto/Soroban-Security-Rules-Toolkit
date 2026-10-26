@@ -1,0 +1,7 @@
+/target
+**/target
+# Fixture contracts are scan inputs; their lockfiles are not tracked.
+/fixtures/**/Cargo.lock
+*.sarif
+/a.json
+/b.json

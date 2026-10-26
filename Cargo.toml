@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/guard-parser",
+]
+# Fixture contracts are scan inputs, not workspace members.
+exclude = ["fixtures"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit"
+homepage = "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit"
+authors = ["stellar-guard contributors"]
+keywords = ["soroban", "stellar", "security", "static-analysis", "smart-contracts"]
+categories = ["development-tools", "command-line-utilities"]
+
+[workspace.dependencies]
+guard-parser = { path = "crates/guard-parser", version = "0.1.0" }
+guard-engine = { path = "crates/guard-engine", version = "0.1.0" }
+guard-rules = { path = "crates/guard-rules", version = "0.1.0" }
+guard-reporters = { path = "crates/guard-reporters", version = "0.1.0" }
+
+syn = { version = "2.0", features = ["full", "visit", "visit-mut", "extra-traits"] }
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+quote = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+globset = "0.4"
+walkdir = "2.5"
+thiserror = "2.0"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+tempfile = "3.10"
+assert_cmd = "2.0"
+predicates = "3.1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
