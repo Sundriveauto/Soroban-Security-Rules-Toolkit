@@ -80,7 +80,7 @@ fn vulnerable_examples_match_markers() {
     let exp = expected(&root);
     assert!(exp.len() >= 15, "fixtures should contain markers");
     let rules: BTreeSet<_> = exp.iter().map(|(_, _, r)| r.clone()).collect();
-    assert_eq!(rules.len(), 5, "every rule needs vulnerable fixtures: {rules:?}");
+    assert_eq!(rules.len(), guard_rules::all().len(), "every rule needs vulnerable fixtures: {rules:?}");
     let act = actual(&root);
     assert_eq!(exp, act, "\n{}", diff(&exp, &act));
 }

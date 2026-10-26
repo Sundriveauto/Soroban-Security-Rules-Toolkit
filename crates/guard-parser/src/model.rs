@@ -4,7 +4,7 @@
 //! contract function, or anything it calls, perform `require_auth`?" without
 //! each rule re-implementing call-graph traversal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use syn::visit::Visit;
 use syn::{Attribute, Block, Expr, Signature};
@@ -14,6 +14,9 @@ use crate::syntax::{
     attr_is, call_name, idents, is_assert_macro, macro_args, macro_name, resolved_idents, storage_op, words, Bindings,
     Span, StorageOpKind, StorageTier,
 };
+
+/// How deep helper chains are followed by path-sensitive queries.
+const MAX_DEPTH: usize = 16;
 
 /// Index of a function in [`CrateModel::fns`].
 pub type FnId = usize;
@@ -29,7 +32,7 @@ pub enum FnKind {
 }
 
 /// A function definition anywhere in the crate.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnDef<'a> {
     pub name: String,
     pub kind: FnKind,
@@ -40,6 +43,14 @@ pub struct FnDef<'a> {
     pub attrs: &'a [Attribute],
     /// Span of the function name.
     pub name_span: Span,
+    /// Module path inside the crate: file modules (`src/a/b.rs` → `a::b`) plus inline `mod` blocks.
+    pub module: Vec<String>,
+    /// Self type of the enclosing `impl`, if any.
+    pub self_ty: Option<String>,
+    /// Trait of the enclosing `impl Trait for T` or the trait declaring a default method.
+    pub trait_name: Option<String>,
+    /// `true` for functions of a local dependency crate, modelled only so calls into it resolve.
+    pub foreign: bool,
 }
 
 impl FnDef<'_> {
@@ -78,6 +89,14 @@ pub struct StateWrite {
     pub key_is_parameterised: bool,
     /// The key expression as written (after resolving a local variable once).
     pub key_text: String,
+    /// Lowercase local names (parameters or locals) used inside the key, e.g. `user` in
+    /// `DataKey::Balance(user.clone())`.
+    pub key_locals: Vec<String>,
+    /// Lowercase locals the stored value is built from, following local bindings
+    /// (`let v = Allowance { amount, .. }; set(&k, &v)` → `amount`, `v`).
+    pub value_locals: Vec<String>,
+    /// The stored value is computed by subtraction (`b - amount`, `b.checked_sub(amount)`).
+    pub value_decreasing: bool,
 }
 
 impl StateWrite {
@@ -100,25 +119,94 @@ pub struct CallSite {
     pub span: Span,
     /// Method-call syntax (`x.f()`) rather than path syntax (`f()`, `Self::f()`).
     pub is_method: bool,
+    /// For path calls, the segment before the name: `a` in `a::f()`, `Self` in `Self::f()`,
+    /// `Trait` in `<T as Trait>::f()`.
+    pub qualifier: Option<String>,
+    /// Arguments in order (receiver excluded for method calls).
+    pub args: Vec<CallArg>,
     /// Call appears inside a condition (`if`, `match`, `assert!` …).
     pub in_condition: bool,
+    /// Call runs on only some paths: inside an `if` / `match` arm or a `for` / `while` body.
+    pub in_branch: bool,
+    /// The callee's name looks like an authorization helper (`require_admin`, `check_owner_auth`).
+    /// Trusted only when the crate does not define the helper; otherwise its body is checked.
+    pub auth_named: bool,
+}
+
+/// Which parameters a function authorizes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectAuth {
+    /// Indices (into [`FnDef::params`]) of parameters on which `require_auth` is called,
+    /// directly or by a helper they are passed to.
+    pub params: BTreeSet<usize>,
+    /// Some authorization targets something other than a parameter: a stored admin,
+    /// an auth helper whose body is unknown, or an access-control attribute.
+    pub other: bool,
+}
+
+/// A storage write that decreases a value keyed by parameters of the queried function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Debit {
+    /// The write, or the call leading to it.
+    pub span: Span,
+    /// Indices of the queried function's parameters used in the key.
+    pub key_params: BTreeSet<usize>,
+}
+
+/// One argument of a call.
+#[derive(Debug, Clone, Default)]
+pub struct CallArg {
+    /// The local or parameter passed, with `&`, `.clone()` and similar stripped.
+    pub local: Option<String>,
+    /// The argument is computed by subtraction (`balance - amount`).
+    pub decreasing: bool,
+    /// Lowercase locals the argument is built from, following local bindings
+    /// (`balance.checked_add(amount)` → `amount`, `balance`, …).
+    pub mentions: Vec<String>,
+}
+
+/// How reliably a function performs an authorization check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AuthStatus {
+    /// No authorization on any path.
+    Never,
+    /// Authorization happens on some paths only (e.g. inside an `if`).
+    Sometimes,
+    /// Authorization happens on every path that reaches the end of the function.
+    Always,
 }
 
 /// Security-relevant facts collected directly from one function body.
 #[derive(Debug, Clone, Default)]
 pub struct FnFacts {
-    /// `require_auth` / `require_auth_for_args` calls and recognised auth helpers.
+    /// Authorization checks that run on every path: `require_auth` /
+    /// `require_auth_for_args`, configured `auth-functions` and auth macros.
     pub auth: Vec<Span>,
+    /// Authorization checks that run on some paths only (inside a branch or loop body).
+    pub cond_auth: Vec<Span>,
+    /// Receivers of `require_auth` / `require_auth_for_args` calls, when they are plain
+    /// locals or parameters (`from` in `from.require_auth()`). `None` for other receivers.
+    pub auth_subjects: Vec<Option<String>>,
+    /// `require_auth_for_args` calls: span, receiver (when a plain local) and the
+    /// lowercase local names mentioned in the argument list.
+    pub auth_for_args: Vec<(Span, Option<String>, Vec<String>)>,
     /// The function carries an access-control attribute such as `#[only_owner]`.
     pub auth_attr: bool,
     pub state_writes: Vec<StateWrite>,
     pub storage_reads: Vec<Span>,
+    /// Most specific key name of each `get` (`DataKey::Members` → `Members`), when known.
+    pub read_keys: Vec<String>,
     /// Token transfers whose source is the contract itself.
     pub outflows: Vec<Span>,
-    /// `update_current_contract_wasm` calls.
+    /// Contract upgrades: `update_current_contract_wasm` and `update_current_contract`.
     pub upgrades: Vec<Span>,
+    /// TTL extensions by tier: `storage().<tier>().extend_ttl(..)`; the deployer's
+    /// `extend_ttl_for_contract_instance` / `extend_ttl` count as instance.
+    pub ttl_extends: Vec<Option<StorageTier>>,
     /// Checks for existing state (`has`, or a `get` used in a condition).
     pub init_guards: Vec<Span>,
+    /// Key checked by each entry of `init_guards` (most specific name), when known.
+    pub init_guard_keys: Vec<Option<String>>,
     pub calls: Vec<CallSite>,
     /// Local names whose `.len()` is compared in a condition (`if items.len() >= MAX`).
     pub len_bounds: Vec<String>,
@@ -168,6 +256,9 @@ pub struct CrateModel<'a> {
     pub fns: Vec<FnDef<'a>>,
     pub facts: Vec<FnFacts>,
     by_name: HashMap<String, Vec<FnId>>,
+    /// Key names of crate-level `const` / `static` items (`const KEY: Symbol =
+    /// symbol_short!("ADMIN")` → `KEY` ↦ `["ADMIN"]`), used to resolve storage keys.
+    pub consts: HashMap<String, Vec<String>>,
 }
 
 /// The place where a transitive property was found, seen from the queried function.
@@ -182,28 +273,53 @@ pub struct Witness {
 impl<'a> CrateModel<'a> {
     /// Builds models for every crate in the project.
     pub fn build_all(project: &'a Project, opts: &ModelOptions) -> Vec<CrateModel<'a>> {
-        (0..project.crates.len().max(1)).map(|id| CrateModel::build(project, id, opts)).collect()
+        // Analyse each crate's own functions once; dependency crates are then shared
+        // (cloned) into every crate that uses them instead of being re-analysed.
+        let n = project.crates.len().max(1);
+        let own: Vec<OwnFns<'a>> = (0..n).map(|id| OwnFns::collect(project, id, opts)).collect();
+        (0..n).map(|id| CrateModel::assemble(project, id, &own)).collect()
     }
 
     pub fn build(project: &'a Project, crate_id: usize, opts: &ModelOptions) -> Self {
-        let mut fns = Vec::new();
-        for (file_idx, file) in project.files.iter().enumerate() {
-            if file.crate_id != crate_id {
+        let n = project.crates.len().max(1);
+        let own: Vec<OwnFns<'a>> = (0..n).map(|id| OwnFns::collect(project, id, opts)).collect();
+        CrateModel::assemble(project, crate_id, &own)
+    }
+
+    fn assemble(project: &'a Project, crate_id: usize, own: &[OwnFns<'a>]) -> Self {
+        let mut fns = own[crate_id].fns.clone();
+        let mut facts = own[crate_id].facts.clone();
+        // Helpers from local dependency crates (`common::require_admin`), so calls into a
+        // shared library crate in the same workspace are followed. Their module paths are
+        // prefixed with the crate name.
+        let deps = project.crates.get(crate_id).map(|c| c.local_deps.clone()).unwrap_or_default();
+        for (i, c) in project.crates.iter().enumerate() {
+            let Some(name) = c.rust_name() else { continue };
+            if i == crate_id || !deps.contains(&name) {
                 continue;
             }
-            collect_items(&file.ast.items, file_idx, &mut fns);
+            for (f, fx) in own[i].fns.iter().zip(&own[i].facts) {
+                let mut f = f.clone();
+                f.module.insert(0, name.clone());
+                f.foreign = true;
+                // Exports of a dependency are not this crate's contract interface.
+                if let FnKind::ContractExport { contract, .. } = &f.kind {
+                    f.kind = FnKind::Method { self_ty: contract.clone(), has_self: false };
+                }
+                fns.push(f);
+                facts.push(fx.clone());
+            }
         }
-        let facts = fns.iter().map(|f| collect_facts(f, opts)).collect();
         let mut by_name: HashMap<String, Vec<FnId>> = HashMap::new();
         for (i, f) in fns.iter().enumerate() {
             by_name.entry(f.name.clone()).or_default().push(i);
         }
-        CrateModel { crate_id, fns, facts, by_name }
+        CrateModel { crate_id, fns, facts, by_name, consts: own[crate_id].consts.clone() }
     }
 
     /// Functions defined in a given file.
     pub fn fns_in_file(&self, file: usize) -> impl Iterator<Item = (FnId, &FnDef<'a>)> {
-        self.fns.iter().enumerate().filter(move |(_, f)| f.file == file)
+        self.fns.iter().enumerate().filter(move |(_, f)| f.file == file && !f.foreign)
     }
 
     /// Functions with the given name.
@@ -211,9 +327,16 @@ impl<'a> CrateModel<'a> {
         self.by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Crate functions a call site may refer to (name-based, conservative).
-    pub fn resolve(&self, call: &CallSite) -> Vec<FnId> {
-        self.by_name(&call.name)
+    /// Crate functions a call site in `caller` may refer to.
+    ///
+    /// Candidates are found by name, then narrowed by the call's qualifier
+    /// (`a::f` → functions in module `a` or on type/trait `a`, `Self::f` → the
+    /// caller's impl) or, for unqualified calls, by the caller's module. When
+    /// narrowing leaves nothing (e.g. a `use` alias), all same-named candidates
+    /// are kept, so resolution stays conservative.
+    pub fn resolve(&self, caller: FnId, call: &CallSite) -> Vec<FnId> {
+        let all: Vec<FnId> = self
+            .by_name(&call.name)
             .iter()
             .copied()
             .filter(|&id| {
@@ -223,7 +346,61 @@ impl<'a> CrateModel<'a> {
                     true
                 }
             })
-            .collect()
+            .collect();
+        if all.len() < 2 {
+            return all;
+        }
+        let from = &self.fns[caller];
+        // A call qualified with a dependency crate's name (`common::f`) refers to its root module.
+        if let Some(q) = call.qualifier.as_deref() {
+            let in_dep_root: Vec<FnId> = all
+                .iter()
+                .copied()
+                .filter(|&id| self.fns[id].foreign && self.fns[id].module.len() == 1 && self.fns[id].module[0] == q)
+                .collect();
+            if !in_dep_root.is_empty() {
+                return in_dep_root;
+            }
+        }
+        // Otherwise prefer this crate's own functions over same-named dependency helpers.
+        let own: Vec<FnId> = all.iter().copied().filter(|&id| self.fns[id].foreign == from.foreign).collect();
+        let all = if own.is_empty() { all } else { own };
+        if all.len() < 2 {
+            return all;
+        }
+        let narrowed: Vec<FnId> = match call.qualifier.as_deref() {
+            Some("Self") => all.iter().copied().filter(|&id| self.fns[id].self_ty == from.self_ty).collect(),
+            Some("crate") => all.iter().copied().filter(|&id| self.fns[id].module.is_empty()).collect(),
+            Some("self") => all.iter().copied().filter(|&id| self.fns[id].module == from.module).collect(),
+            Some("super") => {
+                let parent = &from.module[..from.module.len().saturating_sub(1)];
+                all.iter().copied().filter(|&id| self.fns[id].module == parent).collect()
+            }
+            Some(q) => all
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    let f = &self.fns[id];
+                    f.module.last().is_some_and(|m| m == q)
+                        || f.self_ty.as_deref() == Some(q)
+                        || f.trait_name.as_deref() == Some(q)
+                })
+                .collect(),
+            None if call.is_method => match &from.self_ty {
+                Some(ty) => all.iter().copied().filter(|&id| self.fns[id].self_ty.as_ref() == Some(ty)).collect(),
+                None => vec![],
+            },
+            None => all
+                .iter()
+                .copied()
+                .filter(|&id| self.fns[id].module == from.module && self.fns[id].self_ty.is_none())
+                .collect(),
+        };
+        if narrowed.is_empty() {
+            all
+        } else {
+            narrowed
+        }
     }
 
     /// Finds where `pred` holds, either directly in `id` or in any function it
@@ -246,7 +423,7 @@ impl<'a> CrateModel<'a> {
             return Some(Witness { span, via: vec![] });
         }
         for call in &self.facts[id].calls {
-            for callee in self.resolve(call) {
+            for callee in self.resolve(id, call) {
                 if let Some(w) = self.witness_inner(callee, pred, visited) {
                     let mut via = vec![self.fns[callee].name.clone()];
                     via.extend(w.via);
@@ -257,21 +434,240 @@ impl<'a> CrateModel<'a> {
         None
     }
 
-    /// `true` if `id` or anything it calls performs an authorization check.
+    /// `true` if `id` or anything it calls performs an authorization check on at least one path.
     pub fn performs_auth(&self, id: FnId) -> bool {
-        self.witness(id, &|def, f| {
-            if f.auth_attr || def.attrs.iter().any(is_auth_attr) {
-                Some(def.name_span)
+        self.auth_status(id) != AuthStatus::Never
+    }
+
+    /// Whether `id`, directly or through the helpers it calls, authorizes on
+    /// every path, on some paths, or never.
+    ///
+    /// Helpers whose names look like auth checks are followed into their bodies
+    /// when the crate defines them, so an empty `fn check_admin() {}` does not count.
+    pub fn auth_status(&self, id: FnId) -> AuthStatus {
+        let mut visited = HashSet::new();
+        self.auth_status_inner(id, &mut visited)
+    }
+
+    fn auth_status_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> AuthStatus {
+        if stack.len() > MAX_DEPTH || !stack.insert(id) {
+            return AuthStatus::Never;
+        }
+        let status = self.auth_status_body(id, stack);
+        stack.remove(&id);
+        status
+    }
+
+    fn auth_status_body(&self, id: FnId, visited: &mut HashSet<FnId>) -> AuthStatus {
+        let def = &self.fns[id];
+        let facts = &self.facts[id];
+        if facts.auth_attr || def.attrs.iter().any(is_auth_attr) || !facts.auth.is_empty() {
+            return AuthStatus::Always;
+        }
+        let mut best = if facts.cond_auth.is_empty() { AuthStatus::Never } else { AuthStatus::Sometimes };
+        for call in &facts.calls {
+            let callees = self.resolve(id, call);
+            let status = if callees.is_empty() {
+                if call.auth_named {
+                    AuthStatus::Always
+                } else {
+                    AuthStatus::Never
+                }
             } else {
-                f.auth.first().copied()
+                callees.iter().map(|&c| self.auth_status_inner(c, visited)).max().unwrap_or(AuthStatus::Never)
+            };
+            let status = if call.in_branch { status.min(AuthStatus::Sometimes) } else { status };
+            if status == AuthStatus::Always {
+                return AuthStatus::Always;
             }
-        })
-        .is_some()
+            best = best.max(status);
+        }
+        best
+    }
+
+    /// Names of `id`'s parameters, in order (receiver excluded).
+    pub fn param_names(&self, id: FnId) -> Vec<String> {
+        self.fns[id].params().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// Which of `id`'s parameters are authorized with `require_auth`, following helpers.
+    pub fn subject_auth(&self, id: FnId) -> SubjectAuth {
+        self.subject_auth_inner(id, &mut HashSet::new())
+    }
+
+    fn subject_auth_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> SubjectAuth {
+        if stack.len() > MAX_DEPTH || !stack.insert(id) {
+            return SubjectAuth::default();
+        }
+        let out = self.subject_auth_body(id, stack);
+        stack.remove(&id);
+        out
+    }
+
+    fn subject_auth_body(&self, id: FnId, visited: &mut HashSet<FnId>) -> SubjectAuth {
+        let mut out = SubjectAuth::default();
+        let def = &self.fns[id];
+        let facts = &self.facts[id];
+        let params = self.param_names(id);
+        let idx = |n: &str| params.iter().position(|p| p == n);
+        if facts.auth_attr || def.attrs.iter().any(is_auth_attr) {
+            out.other = true;
+        }
+        for subj in &facts.auth_subjects {
+            match subj.as_deref().and_then(idx) {
+                Some(i) => {
+                    out.params.insert(i);
+                }
+                None => out.other = true,
+            }
+        }
+        // Configured auth functions and auth macros have no subject.
+        if facts.auth.len() + facts.cond_auth.len() > facts.auth_subjects.len() {
+            out.other = true;
+        }
+        for call in &facts.calls {
+            let callees = self.resolve(id, call);
+            if callees.is_empty() {
+                out.other |= call.auth_named;
+                continue;
+            }
+            for callee in callees {
+                let sub = self.subject_auth_inner(callee, visited);
+                out.other |= sub.other;
+                for j in sub.params {
+                    match call.args.get(j).and_then(|a| a.local.as_deref()).and_then(idx) {
+                        Some(i) => {
+                            out.params.insert(i);
+                        }
+                        None => out.other = true,
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Writes that decrease a value keyed by `id`'s parameters (`Balance(from)` set to
+    /// `balance - amount`), directly or through helpers such as `spend_balance(&e, &from, amount)`.
+    pub fn debits(&self, id: FnId) -> Vec<Debit> {
+        self.debits_inner(id, &mut HashSet::new()).0
+    }
+
+    /// Returns debits plus "value writes": writes keyed by parameters `K` whose value is
+    /// parameter `v`, which become debits when a caller passes a decreasing value as `v`.
+    #[allow(clippy::type_complexity)]
+    fn debits_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> (Vec<Debit>, Vec<(BTreeSet<usize>, usize)>) {
+        if stack.len() > MAX_DEPTH || !stack.insert(id) {
+            return (Vec::new(), Vec::new());
+        }
+        let out = self.debits_body(id, stack);
+        stack.remove(&id);
+        out
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn debits_body(&self, id: FnId, visited: &mut HashSet<FnId>) -> (Vec<Debit>, Vec<(BTreeSet<usize>, usize)>) {
+        let mut debits = Vec::new();
+        let mut value_writes = Vec::new();
+        let params = self.param_names(id);
+        let idx = |n: &str| params.iter().position(|p| p == n);
+        let facts = &self.facts[id];
+        for w in &facts.state_writes {
+            let key: BTreeSet<usize> = w.key_locals.iter().filter_map(|n| idx(n)).collect();
+            if key.is_empty() {
+                continue;
+            }
+            if w.value_decreasing {
+                debits.push(Debit { span: w.span, key_params: key });
+            } else {
+                for v in w.value_locals.iter().filter_map(|n| idx(n)) {
+                    value_writes.push((key.clone(), v));
+                }
+            }
+        }
+        for call in &facts.calls {
+            let map_key = |k: &BTreeSet<usize>| -> BTreeSet<usize> {
+                k.iter().filter_map(|&j| call.args.get(j)?.local.as_deref().and_then(idx)).collect()
+            };
+            for callee in self.resolve(id, call) {
+                let (sub_debits, sub_writes) = self.debits_inner(callee, visited);
+                for d in sub_debits {
+                    let key = map_key(&d.key_params);
+                    if !key.is_empty() {
+                        debits.push(Debit { span: call.span, key_params: key });
+                    }
+                }
+                for (k, v) in sub_writes {
+                    let key = map_key(&k);
+                    let Some(arg) = call.args.get(v) else { continue };
+                    if key.is_empty() {
+                        continue;
+                    }
+                    if arg.decreasing {
+                        debits.push(Debit { span: call.span, key_params: key });
+                    } else if let Some(vi) = arg.local.as_deref().and_then(idx) {
+                        value_writes.push((key, vi));
+                    }
+                }
+            }
+        }
+        (debits, value_writes)
     }
 
     /// `true` if `id` or anything it calls reads contract storage.
     pub fn reads_storage(&self, id: FnId) -> bool {
         self.witness(id, &|_, f| f.storage_reads.first().copied()).is_some()
+    }
+
+    /// `id` and every crate function it (transitively) calls.
+    pub fn reachable(&self, id: FnId) -> Vec<FnId> {
+        let mut seen = vec![id];
+        let mut i = 0;
+        while i < seen.len() && seen.len() < 256 {
+            let f = seen[i];
+            for call in &self.facts[f].calls {
+                for callee in self.resolve(f, call) {
+                    if !seen.contains(&callee) {
+                        seen.push(callee);
+                    }
+                }
+            }
+            i += 1;
+        }
+        seen
+    }
+
+    /// Storage keys (most specific name) written by `id` or anything it calls.
+    pub fn written_keys(&self, id: FnId) -> BTreeSet<String> {
+        self.reachable(id)
+            .into_iter()
+            .flat_map(|f| self.facts[f].state_writes.iter().filter_map(|w| w.key_idents.last().cloned()))
+            .collect()
+    }
+
+    /// Keys checked by `id`'s "already initialized" guards, or `None` when any
+    /// guard's key is unknown (so callers should trust the guard).
+    pub fn init_guard_keys(&self, id: FnId) -> Option<BTreeSet<String>> {
+        let mut keys = BTreeSet::new();
+        for f in self.reachable(id) {
+            for k in &self.facts[f].init_guard_keys {
+                keys.insert(k.clone()?);
+            }
+        }
+        for call in self.facts[id].calls.iter().filter(|c| c.in_condition) {
+            for callee in self.resolve(id, call) {
+                if !self.reads_storage(callee) {
+                    continue;
+                }
+                let read: Vec<String> =
+                    self.reachable(callee).into_iter().flat_map(|f| self.facts[f].read_keys.clone()).collect();
+                if read.is_empty() {
+                    return None;
+                }
+                keys.extend(read);
+            }
+        }
+        Some(keys)
     }
 
     /// `true` if `id` has an "already initialized" style guard, directly, in a
@@ -284,11 +680,26 @@ impl<'a> CrateModel<'a> {
             .calls
             .iter()
             .filter(|c| c.in_condition)
-            .any(|c| self.resolve(c).into_iter().any(|callee| self.reads_storage(callee)))
+            .any(|c| self.resolve(id, c).into_iter().any(|callee| self.reads_storage(callee)))
     }
 }
 
-fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a>>) {
+/// Module path of a source file inside its crate: `src/lib.rs` → `[]`,
+/// `src/a.rs` and `src/a/mod.rs` → `["a"]`, `src/a/b.rs` → `["a", "b"]`.
+fn file_module_path(path: &std::path::Path) -> Vec<String> {
+    let comps: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let start = comps.iter().rposition(|c| c == "src").map(|i| i + 1).unwrap_or(comps.len().saturating_sub(1));
+    let mut module: Vec<String> = comps[start..].to_vec();
+    if let Some(last) = module.pop() {
+        let stem = last.strip_suffix(".rs").unwrap_or(&last).to_string();
+        if !matches!(stem.as_str(), "lib" | "main" | "mod") {
+            module.push(stem);
+        }
+    }
+    module
+}
+
+fn collect_items<'a>(items: &'a [syn::Item], file: usize, module: &[String], out: &mut Vec<FnDef<'a>>) {
     for item in items {
         match item {
             syn::Item::Fn(f) => out.push(FnDef {
@@ -299,6 +710,10 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a
                 block: &f.block,
                 attrs: &f.attrs,
                 name_span: Span::of(&f.sig.ident),
+                module: module.to_vec(),
+                self_ty: None,
+                trait_name: None,
+                foreign: false,
             }),
             syn::Item::Impl(imp) => {
                 let is_contract = imp.attrs.iter().any(|a| attr_is(a, "contractimpl"));
@@ -325,12 +740,38 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a
                         block: &f.block,
                         attrs: &f.attrs,
                         name_span: Span::of(&f.sig.ident),
+                        module: module.to_vec(),
+                        self_ty: Some(self_ty.clone()),
+                        trait_name: trait_name.clone(),
+                        foreign: false,
+                    });
+                }
+            }
+            syn::Item::Trait(t) => {
+                // Default method bodies are callable through every implementor.
+                for it in &t.items {
+                    let syn::TraitItem::Fn(f) = it else { continue };
+                    let Some(block) = &f.default else { continue };
+                    out.push(FnDef {
+                        name: f.sig.ident.to_string(),
+                        kind: FnKind::Method { self_ty: String::new(), has_self: f.sig.receiver().is_some() },
+                        file,
+                        sig: &f.sig,
+                        block,
+                        attrs: &f.attrs,
+                        name_span: Span::of(&f.sig.ident),
+                        module: module.to_vec(),
+                        self_ty: None,
+                        trait_name: Some(t.ident.to_string()),
+                        foreign: false,
                     });
                 }
             }
             syn::Item::Mod(m) => {
                 if let Some((_, items)) = &m.content {
-                    collect_items(items, file, out);
+                    let mut inner = module.to_vec();
+                    inner.push(m.ident.to_string());
+                    collect_items(items, file, &inner, out);
                 }
             }
             _ => {}
@@ -338,13 +779,172 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a
     }
 }
 
-fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
+/// `true` if an expression always leaves the function: `panic!`, `return`, a
+/// `panic_with_error!` call, or a block ending in one of those.
+fn diverges(expr: &Expr) -> bool {
+    match crate::syntax::strip(expr) {
+        Expr::Return(_) => true,
+        Expr::Macro(m) => {
+            let n = macro_name(&m.mac);
+            matches!(n.as_str(), "panic" | "panic_with_error" | "unreachable" | "unimplemented" | "todo")
+        }
+        Expr::Block(b) => b.block.stmts.last().is_some_and(|s| match s {
+            syn::Stmt::Expr(e, _) => diverges(e),
+            syn::Stmt::Macro(m) => {
+                let n = macro_name(&m.mac);
+                matches!(n.as_str(), "panic" | "panic_with_error" | "unreachable" | "unimplemented" | "todo")
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// The local passed as an argument, ignoring `&`, `*`, `.clone()`, `.into()` and the like.
+fn plain_local(e: &Expr) -> Option<String> {
+    match crate::syntax::strip(e) {
+        Expr::MethodCall(m)
+            if m.args.is_empty() && matches!(m.method.to_string().as_str(), "clone" | "into" | "to_owned") =>
+        {
+            plain_local(&m.receiver)
+        }
+        other => crate::syntax::as_local_ident(other),
+    }
+}
+
+/// Lowercase locals mentioned in an expression, following local bindings
+/// (`let key = DataKey::Balance(user.clone())`).
+fn locals_in(key: &Expr, b: &Bindings<'_>) -> Vec<String> {
+    let mut out: Vec<String> = resolved_idents(key, b)
+        .into_iter()
+        .filter(|i| i.starts_with(|c: char| c.is_lowercase()) && !matches!(i.as_str(), "clone" | "into" | "to_owned"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `true` if the value is computed by subtraction, directly or through a local
+/// (`let nb = b - amount; set(&k, &nb)`).
+fn is_decreasing(e: &Expr, b: &Bindings<'_>) -> bool {
+    struct D(bool);
+    impl<'ast> Visit<'ast> for D {
+        fn visit_expr_binary(&mut self, x: &'ast syn::ExprBinary) {
+            if matches!(x.op, syn::BinOp::Sub(_) | syn::BinOp::SubAssign(_)) {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_binary(self, x);
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if matches!(m.method.to_string().as_str(), "checked_sub" | "saturating_sub" | "wrapping_sub") {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut d = D(false);
+    d.visit_expr(e);
+    if !d.0 {
+        if let Some(init) = b.resolve(e) {
+            if !std::ptr::eq(crate::syntax::strip(init), crate::syntax::strip(e)) {
+                d.visit_expr(init);
+            }
+        }
+    }
+    d.0
+}
+
+/// The path segment before the function name in a call: `a::f` → `a`,
+/// `<T as Trait>::f` → `Trait`.
+fn call_qualifier(c: &syn::ExprCall) -> Option<String> {
+    let Expr::Path(p) = crate::syntax::strip(&c.func) else { return None };
+    if let Some(q) = &p.qself {
+        if q.position > 0 {
+            return p.path.segments.iter().nth(q.position - 1).map(|s| s.ident.to_string());
+        }
+        return match &*q.ty {
+            syn::Type::Path(tp) => tp.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        };
+    }
+    let n = p.path.segments.len();
+    (n >= 2).then(|| p.path.segments[n - 2].ident.to_string())
+}
+
+/// One crate's own functions with their facts, computed once per scan.
+struct OwnFns<'a> {
+    fns: Vec<FnDef<'a>>,
+    facts: Vec<FnFacts>,
+    consts: HashMap<String, Vec<String>>,
+}
+
+impl<'a> OwnFns<'a> {
+    fn collect(project: &'a Project, crate_id: usize, opts: &ModelOptions) -> Self {
+        let mut fns = Vec::new();
+        let mut consts = HashMap::new();
+        for (file_idx, file) in project.files.iter().enumerate() {
+            if file.crate_id != crate_id {
+                continue;
+            }
+            let module = file_module_path(&file.path);
+            collect_items(&file.ast.items, file_idx, &module, &mut fns);
+            collect_consts(&file.ast.items, &mut consts);
+        }
+        let facts = fns.iter().map(|f| collect_facts(f, opts, &consts)).collect();
+        OwnFns { fns, facts, consts }
+    }
+}
+
+/// Key names of `const` / `static` items, including those in inline modules.
+fn collect_consts(items: &[syn::Item], out: &mut HashMap<String, Vec<String>>) {
+    let empty = Bindings::default();
+    for item in items {
+        let (name, expr) = match item {
+            syn::Item::Const(c) => (c.ident.to_string(), &*c.expr),
+            syn::Item::Static(s) => (s.ident.to_string(), &*s.expr),
+            syn::Item::Mod(m) => {
+                if let Some((_, items)) = &m.content {
+                    collect_consts(items, out);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let names = crate::syntax::key_names(expr, &empty);
+        if !names.is_empty() {
+            out.insert(name, names);
+        }
+    }
+}
+
+/// Key names with a constant (`&ADMIN_KEY`, `&keys::ADMIN_KEY`) replaced by its value's names,
+/// keeping the constant's own name first so both contribute words.
+pub fn resolve_const_key(names: Vec<String>, consts: &HashMap<String, Vec<String>>) -> Vec<String> {
+    // `KEY` or `keys::KEY` (module path segments are lowercase).
+    let Some((last, prefix)) = names.split_last() else { return names };
+    if !prefix.iter().all(|p| p.starts_with(|c: char| c.is_lowercase())) {
+        return names;
+    }
+    match consts.get(last) {
+        Some(value) => {
+            let mut out = vec![last.clone()];
+            out.extend(value.iter().filter(|v| *v != last).cloned());
+            out
+        }
+        None => names,
+    }
+}
+
+fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions, consts: &HashMap<String, Vec<String>>) -> FnFacts {
     let bindings = Bindings::collect(def.block);
     let mut v = FactsVisitor {
         bindings: &bindings,
+        consts,
         opts,
         facts: FnFacts { auth_attr: def.attrs.iter().any(is_auth_attr), ..Default::default() },
         cond_depth: 0,
+        branch_depth: 0,
     };
     v.visit_block(def.block);
     v.facts
@@ -352,9 +952,12 @@ fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
 
 struct FactsVisitor<'b, 'a> {
     bindings: &'b Bindings<'a>,
+    consts: &'b HashMap<String, Vec<String>>,
     opts: &'b ModelOptions,
     facts: FnFacts,
     cond_depth: usize,
+    /// > 0 inside code that runs on some paths only.
+    branch_depth: usize,
 }
 
 impl FactsVisitor<'_, '_> {
@@ -362,6 +965,60 @@ impl FactsVisitor<'_, '_> {
         self.cond_depth += 1;
         f(self);
         self.cond_depth -= 1;
+    }
+
+    fn branch<F: FnOnce(&mut Self)>(&mut self, f: F) {
+        self.branch_depth += 1;
+        f(self);
+        self.branch_depth -= 1;
+    }
+
+    /// Records a direct authorization check, conditional or not.
+    fn push_auth(&mut self, span: Span) {
+        if self.branch_depth > 0 {
+            self.facts.cond_auth.push(span);
+        } else {
+            self.facts.auth.push(span);
+        }
+    }
+
+    fn push_call<'e>(
+        &mut self,
+        name: String,
+        span: Span,
+        is_method: bool,
+        qualifier: Option<String>,
+        args: impl IntoIterator<Item = &'e Expr>,
+    ) {
+        let auth_named = is_auth_helper_name(&name, &[]);
+        let args = args
+            .into_iter()
+            .map(|a| CallArg {
+                local: plain_local(a),
+                decreasing: is_decreasing(a, self.bindings),
+                mentions: locals_in(a, self.bindings),
+            })
+            .collect();
+        self.facts.calls.push(CallSite {
+            name,
+            span,
+            is_method,
+            qualifier,
+            args,
+            in_condition: self.cond_depth > 0,
+            in_branch: self.branch_depth > 0,
+            auth_named,
+        });
+    }
+
+    /// When every alternative of an `if`/`else` or `match` performs a direct
+    /// auth check, the check runs on every path.
+    fn promote_if_exhaustive(&mut self, all_branches_auth: bool, first: Option<Span>) {
+        if all_branches_auth && self.branch_depth == 0 {
+            if let Some(span) = first {
+                self.facts.auth.push(span);
+            }
+        }
     }
 
     fn expr_reads_storage(&self, expr: &Expr) -> bool {
@@ -383,13 +1040,60 @@ impl FactsVisitor<'_, '_> {
     }
 }
 
+impl FactsVisitor<'_, '_> {
+    /// Key names of a storage key expression, resolving crate constants.
+    fn key_names(&self, k: &Expr) -> Vec<String> {
+        resolve_const_key(crate::syntax::key_names(k, self.bindings), self.consts)
+    }
+
+    /// Key name of the first storage read inside `expr`.
+    fn read_key_in(&self, expr: &Expr) -> Option<String> {
+        struct R<'x, 'a> {
+            b: &'x Bindings<'a>,
+            key: Option<Vec<String>>,
+            key_found: bool,
+        }
+        impl<'ast> Visit<'ast> for R<'_, '_> {
+            fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+                if !self.key_found {
+                    if let Some(op) = storage_op(m, self.b).filter(|op| op.kind.is_read()) {
+                        self.key = op.key().map(|k| crate::syntax::key_names(k, self.b));
+                        self.key_found = true;
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, m);
+            }
+        }
+        let mut r = R { b: self.bindings, key: None, key_found: false };
+        r.visit_expr(expr);
+        r.key.and_then(|names| resolve_const_key(names, self.consts).pop())
+    }
+}
+
 impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
     fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
         let name = m.method.to_string();
         let span = Span::of(&m.method);
         match name.as_str() {
-            "require_auth" | "require_auth_for_args" => self.facts.auth.push(span),
-            "update_current_contract_wasm" => self.facts.upgrades.push(span),
+            "require_auth" | "require_auth_for_args" => {
+                self.push_auth(span);
+                self.facts.auth_subjects.push(plain_local(&m.receiver));
+                if name == "require_auth_for_args" {
+                    let mut locals: Vec<String> = m
+                        .args
+                        .iter()
+                        .flat_map(|a| resolved_idents(a, self.bindings))
+                        .filter(|i| i.starts_with(|c: char| c.is_lowercase()))
+                        .collect();
+                    locals.sort();
+                    locals.dedup();
+                    self.facts.auth_for_args.push((span, plain_local(&m.receiver), locals));
+                }
+            }
+            "update_current_contract_wasm" | "update_current_contract" => self.facts.upgrades.push(span),
+            "extend_ttl_for_contract_instance" | "extend_ttl_for_code" => {
+                self.facts.ttl_extends.push(Some(StorageTier::Instance))
+            }
             "transfer" | "transfer_from" => {
                 let from_contract = m
                     .args
@@ -401,7 +1105,11 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             }
             _ => {}
         }
-        if let Some(op) = storage_op(m, self.bindings) {
+        let op = storage_op(m, self.bindings);
+        if let Some(op) = op.as_ref().filter(|op| op.kind == StorageOpKind::ExtendTtl) {
+            self.facts.ttl_extends.push(op.tier);
+        }
+        if let Some(op) = op {
             if op.kind.is_write() {
                 let key_text = op
                     .key()
@@ -419,10 +1127,12 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                             ),
                             _ => false,
                         };
-                        (crate::syntax::key_names(k, self.bindings), parameterised)
+                        (self.key_names(k), parameterised)
                     }
                     None => (vec![], false),
                 };
+                let key_locals = op.key().map(|k| locals_in(k, self.bindings)).unwrap_or_default();
+                let value = (op.kind == StorageOpKind::Set).then(|| m.args.iter().nth(1)).flatten();
                 self.facts.state_writes.push(StateWrite {
                     span,
                     kind: op.kind,
@@ -430,17 +1140,27 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                     key_idents,
                     key_is_parameterised,
                     key_text,
+                    key_locals,
+                    value_locals: value.map(|v| locals_in(v, self.bindings)).unwrap_or_default(),
+                    value_decreasing: value.is_some_and(|v| is_decreasing(v, self.bindings)),
                 });
             } else if op.kind.is_read() {
                 self.facts.storage_reads.push(span);
+                if op.kind == StorageOpKind::Get {
+                    if let Some(k) = op.key().and_then(|k| self.key_names(k).pop()) {
+                        self.facts.read_keys.push(k);
+                    }
+                }
                 if op.kind == StorageOpKind::Has || self.cond_depth > 0 {
                     self.facts.init_guards.push(span);
+                    let key = op.key().and_then(|k| self.key_names(k).pop());
+                    self.facts.init_guard_keys.push(key);
                 }
             }
-        } else if is_auth_helper_name(&name, &self.opts.auth_functions) {
-            self.facts.auth.push(span);
-        } else {
-            self.facts.calls.push(CallSite { name, span, is_method: true, in_condition: self.cond_depth > 0 });
+        } else if self.opts.auth_functions.contains(&name) {
+            self.push_auth(span);
+        } else if !matches!(name.as_str(), "require_auth" | "require_auth_for_args") {
+            self.push_call(name, span, true, None, &m.args);
         }
         syn::visit::visit_expr_method_call(self, m);
     }
@@ -448,10 +1168,10 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
     fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
         if let Some(name) = call_name(c) {
             let span = Span::of(&c.func);
-            if is_auth_helper_name(&name, &self.opts.auth_functions) {
-                self.facts.auth.push(span);
+            if self.opts.auth_functions.contains(&name) {
+                self.push_auth(span);
             } else {
-                self.facts.calls.push(CallSite { name, span, is_method: false, in_condition: self.cond_depth > 0 });
+                self.push_call(name, span, false, call_qualifier(c), &c.args);
             }
         }
         syn::visit::visit_expr_call(self, c);
@@ -459,25 +1179,52 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
         self.condition(|s| s.visit_expr(&e.cond));
-        self.visit_block(&e.then_branch);
+        let before = self.facts.cond_auth.len();
+        self.branch(|s| s.visit_block(&e.then_branch));
+        let after_then = self.facts.cond_auth.len();
+        let mut all = after_then > before;
         if let Some((_, els)) = &e.else_branch {
-            self.visit_expr(els);
+            self.branch(|s| s.visit_expr(els));
+            all &= self.facts.cond_auth.len() > after_then;
+        } else {
+            all = false;
         }
+        let first = self.facts.cond_auth.get(before).copied();
+        self.promote_if_exhaustive(all, first);
     }
 
     fn visit_expr_match(&mut self, e: &'ast syn::ExprMatch) {
         self.condition(|s| s.visit_expr(&e.expr));
+        let before = self.facts.cond_auth.len();
+        let mut all = !e.arms.is_empty();
         for arm in &e.arms {
             if let Some((_, g)) = &arm.guard {
                 self.condition(|s| s.visit_expr(g));
             }
-            self.visit_expr(&arm.body);
+            let n = self.facts.cond_auth.len();
+            self.branch(|s| s.visit_expr(&arm.body));
+            // An arm that diverges (`panic!`, `return`) need not authorize.
+            all &= self.facts.cond_auth.len() > n || diverges(&arm.body);
         }
+        let first = self.facts.cond_auth.get(before).copied();
+        self.promote_if_exhaustive(all, first);
     }
 
     fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
         self.condition(|s| s.visit_expr(&e.cond));
-        self.visit_block(&e.body);
+        self.branch(|s| s.visit_block(&e.body));
+    }
+
+    fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+        // A closure may run once, many times (iterator adapters over a possibly
+        // empty collection) or never (stored and not called).
+        self.branch(|s| s.visit_expr(&c.body));
+    }
+
+    fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
+        self.visit_expr(&e.expr);
+        // The body may run zero times.
+        self.branch(|s| s.visit_block(&e.body));
     }
 
     fn visit_local(&mut self, local: &'ast syn::Local) {
@@ -498,6 +1245,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             if let Some(init) = self.bindings.get(&name, Span::of(p).start) {
                 if self.expr_reads_storage(init) {
                     self.facts.init_guards.push(Span::of(p));
+                    self.facts.init_guard_keys.push(self.read_key_in(init));
                 }
             }
         }
@@ -506,8 +1254,9 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         let name = macro_name(mac);
+        // Macros are not expanded, so an auth-like macro name is trusted.
         if is_auth_helper_name(&name, &self.opts.auth_functions) {
-            self.facts.auth.push(Span::of(&mac.path));
+            self.push_auth(Span::of(&mac.path));
         }
         let args = macro_args(mac);
         if is_assert_macro(&name) {
@@ -605,6 +1354,154 @@ mod tests {
         assert!(m.has_init_guard(id("b")));
         assert!(!m.has_init_guard(id("c")));
         assert!(m.has_init_guard(id("d")));
+    }
+
+    #[test]
+    fn auth_status_tracks_branches_and_helper_bodies() {
+        let p = project(
+            r#"
+            fn require_admin(e: &Env) {}
+            fn require_owner(e: &Env) { let o: Address = e.storage().instance().get(&K::Owner).unwrap(); o.require_auth(); }
+            #[contractimpl]
+            impl C {
+                pub fn fake(e: Env) { require_admin(&e); }
+                pub fn real(e: Env) { require_owner(&e); }
+                pub fn external(e: Env) { require_operator_auth(&e); }
+                pub fn half(e: Env, a: Address, f: bool) { if f { a.require_auth(); } }
+                pub fn both(e: Env, a: Address, b: Address, f: bool) { if f { a.require_auth(); } else { b.require_auth(); } }
+                pub fn arms(e: Env, a: Address, k: u32) { match k { 0 => a.require_auth(), _ => panic!("no") } }
+                pub fn looped(e: Env, xs: Vec<Address>) { for x in xs.iter() { x.require_auth(); } }
+                pub fn helper_in_branch(e: Env, f: bool) { if f { require_owner(&e); } }
+                pub fn closure_iter(e: Env, xs: Vec<Address>) { xs.iter().for_each(|x| x.require_auth()); }
+                pub fn closure_unused(e: Env, a: Address) { let _f = || a.require_auth(); }
+            }
+        "#,
+        );
+        let m = CrateModel::build(&p, 0, &ModelOptions::default());
+        let st = |n: &str| m.auth_status(m.by_name(n)[0]);
+        assert_eq!(st("fake"), AuthStatus::Never);
+        assert_eq!(st("real"), AuthStatus::Always);
+        assert_eq!(st("external"), AuthStatus::Always, "undefined auth-named helpers are trusted");
+        assert_eq!(st("half"), AuthStatus::Sometimes);
+        assert_eq!(st("both"), AuthStatus::Always);
+        assert_eq!(st("arms"), AuthStatus::Always);
+        assert_eq!(st("looped"), AuthStatus::Sometimes);
+        assert_eq!(st("helper_in_branch"), AuthStatus::Sometimes);
+        assert_eq!(st("closure_iter"), AuthStatus::Sometimes);
+        assert_eq!(st("closure_unused"), AuthStatus::Sometimes);
+    }
+
+    #[test]
+    fn resolves_calls_by_module_and_type() {
+        let p = project(
+            r#"
+            mod a { pub fn guard(e: &Env) { let x: Address = e.storage().instance().get(&1u32).unwrap(); x.require_auth(); } }
+            mod b { pub fn guard(e: &Env) {} }
+            pub struct S;
+            impl S { pub fn guard(e: &Env) { let x: Address = todo(); x.require_auth(); } }
+            fn guard(e: &Env) {}
+            #[contractimpl]
+            impl C {
+                pub fn via_b(e: Env) { b::guard(&e); }
+                pub fn via_a(e: Env) { a::guard(&e); }
+                pub fn via_type(e: Env) { S::guard(&e); }
+                pub fn local(e: Env) { guard(&e); }
+                pub fn aliased(e: Env) { other::guard(&e); }
+            }
+        "#,
+        );
+        let m = CrateModel::build(&p, 0, &ModelOptions::default());
+        let st = |n: &str| m.auth_status(m.by_name(n)[0]);
+        assert_eq!(st("via_b"), AuthStatus::Never);
+        assert_eq!(st("via_a"), AuthStatus::Always);
+        assert_eq!(st("via_type"), AuthStatus::Always);
+        assert_eq!(st("local"), AuthStatus::Never, "unqualified call prefers the same module");
+        assert_eq!(st("aliased"), AuthStatus::Always, "unknown qualifier falls back to all candidates");
+        assert_eq!(m.fns[m.by_name("guard")[0]].module, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn follows_trait_impls_and_default_methods() {
+        let p = project(
+            r#"
+            pub trait Store {
+                fn put(e: &Env, v: &Address);
+                fn reset(e: &Env) { e.storage().instance().remove(&K::Admin); }
+            }
+            pub struct S;
+            impl Store for S { fn put(e: &Env, v: &Address) { e.storage().instance().set(&K::Admin, v); } }
+            #[contractimpl]
+            impl C {
+                pub fn qualified(e: Env, n: Address) { <S as Store>::put(&e, &n); }
+                pub fn by_type(e: Env, n: Address) { S::put(&e, &n); }
+                pub fn default_method(e: Env) { S::reset(&e); }
+            }
+        "#,
+        );
+        let m = CrateModel::build(&p, 0, &ModelOptions::default());
+        let writes = |n: &str| m.witness(m.by_name(n)[0], &|_, f| f.state_writes.first().map(|w| w.span)).is_some();
+        assert!(writes("qualified"));
+        assert!(writes("by_type"));
+        assert!(writes("default_method"));
+    }
+
+    #[test]
+    fn follows_helpers_in_local_dependency_crates() {
+        let common = CrateInfo { name: Some("common".into()), ..Default::default() };
+        let vault = CrateInfo { name: Some("vault".into()), local_deps: vec!["common".into()], ..Default::default() };
+        let mut p = Project::from_sources(
+            [(
+                "common/src/lib.rs",
+                "pub fn require_admin(e: &Env) {}
+                 pub fn require_owner_auth(e: &Env) { let a: Address = todo(); a.require_auth(); }
+                 pub fn set(e: &Env) {}",
+            )],
+            common,
+            false,
+        );
+        let v = Project::from_sources(
+            [(
+                "vault/src/lib.rs",
+                "#[contractimpl] impl V {
+                    pub fn fake(e: Env) { common::require_admin(&e); }
+                    pub fn real(e: Env) { require_owner_auth(&e); }
+                 }
+                 fn set(e: &Env) {}",
+            )],
+            vault.clone(),
+            false,
+        );
+        p.files.extend(v.files.into_iter().map(|mut f| {
+            f.crate_id = 1;
+            f
+        }));
+        p.crates.push(vault);
+        let models = CrateModel::build_all(&p, &ModelOptions::default());
+        let m = &models[1];
+        let id = |n: &str| m.by_name(n).iter().copied().find(|&i| !m.fns[i].foreign).unwrap();
+        assert_eq!(m.auth_status(id("fake")), AuthStatus::Never);
+        assert_eq!(m.auth_status(id("real")), AuthStatus::Always);
+        assert_eq!(m.fns_in_file(0).count(), 0, "dependency functions are not reported");
+        // Unqualified `set` prefers the crate's own function.
+        let call = CallSite { name: "set".into(), ..m.facts[id("fake")].calls[0].clone() };
+        let call = CallSite { qualifier: None, ..call };
+        assert!(m.resolve(id("fake"), &call).iter().all(|&c| !m.fns[c].foreign));
+    }
+
+    #[test]
+    fn file_module_paths() {
+        use std::path::Path;
+        assert!(file_module_path(Path::new("c/src/lib.rs")).is_empty());
+        assert_eq!(file_module_path(Path::new("c/src/a/mod.rs")), vec!["a"]);
+        assert_eq!(file_module_path(Path::new("c/src/a/b.rs")), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn configured_auth_functions_are_trusted() {
+        let p = project("#[contractimpl] impl C { pub fn a(e: Env) { gate(&e); } }");
+        let opts = ModelOptions { auth_functions: vec!["gate".into()] };
+        let m = CrateModel::build(&p, 0, &opts);
+        assert_eq!(m.auth_status(0), AuthStatus::Always);
     }
 
     #[test]

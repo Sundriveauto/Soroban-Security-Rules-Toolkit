@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 /// Glob patterns excluded unless tests are explicitly included.
-pub const DEFAULT_TEST_EXCLUDES: &[&str] = &["**/tests/**", "**/benches/**", "**/test_snapshots/**"];
+pub const DEFAULT_TEST_EXCLUDES: &[&str] =
+    &["**/tests/**", "**/benches/**", "**/test_snapshots/**", "**/fuzz_targets/**"];
 
 /// Directory names that are never descended into.
 const SKIPPED_DIRS: &[&str] = &["target", "node_modules", ".git"];

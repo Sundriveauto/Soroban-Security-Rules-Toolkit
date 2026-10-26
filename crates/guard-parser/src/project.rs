@@ -172,6 +172,11 @@ struct TestModDecl {
 fn parse_source(text: &str, include_tests: bool) -> syn::Result<(syn::File, Vec<TestModDecl>)> {
     let mut ast = syn::parse_file(text)?;
     let mut mods = Vec::new();
+    // A file starting with `#![cfg(test)]` is test code as a whole.
+    if !include_tests && ast.attrs.iter().any(is_test_attr) {
+        ast.items.clear();
+        return Ok((ast, mods));
+    }
     if !include_tests {
         let mut stripper = TestStripper { mods: &mut mods };
         stripper.visit_file_mut(&mut ast);
@@ -295,6 +300,15 @@ mod tests {
         assert_eq!(file.ast.items.len(), 2);
         let p = Project::from_sources([("lib.rs", src)], CrateInfo::default(), true);
         assert_eq!(p.files[0].ast.items.len(), 4);
+    }
+
+    #[test]
+    fn inner_cfg_test_attribute_marks_whole_file() {
+        let src = "#![cfg(test)]\nfn helper() {}\n";
+        let p = Project::from_sources([("test.rs", src)], CrateInfo::default(), false);
+        assert!(p.files[0].ast.items.is_empty());
+        let p = Project::from_sources([("test.rs", src)], CrateInfo::default(), true);
+        assert_eq!(p.files[0].ast.items.len(), 1);
     }
 
     #[test]

@@ -47,7 +47,13 @@ impl Rule for UnprotectedInitializer {
                 continue;
             }
             let writes = model.witness(id, &|_, facts| facts.state_writes.first().map(|w| w.span)).is_some();
-            if !writes || model.has_init_guard(id) {
+            if !writes {
+                continue;
+            }
+            if model.has_init_guard(id) {
+                if let Some(d) = guard_never_set(model, id, f) {
+                    out.push(d);
+                }
                 continue;
             }
             out.push(
@@ -65,6 +71,49 @@ impl Rule for UnprotectedInitializer {
     }
 }
 
+/// The initializer checks a key (`has(&DataKey::Initialized)`) that it never
+/// writes, so the check passes on every call.
+fn guard_never_set(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_parser::FnDef<'_>) -> Option<Diagnostic> {
+    let guard_keys = model.init_guard_keys(id)?;
+    if guard_keys.is_empty() {
+        return None;
+    }
+    let written = model.written_keys(id);
+    if guard_keys.iter().any(|k| written.contains(k)) {
+        return None;
+    }
+    let set_elsewhere = (0..model.fns.len()).any(|other| {
+        other != id
+            && model.facts[other]
+                .state_writes
+                .iter()
+                .any(|w| w.key_idents.last().is_some_and(|k| guard_keys.contains(k)))
+    });
+    let keys: Vec<String> = guard_keys.iter().map(|k| format!("`{k}`")).collect();
+    let (confidence, note) = if set_elsewhere {
+        (Confidence::Medium, " (it is only set by another function)")
+    } else {
+        (Confidence::High, "")
+    };
+    Some(
+        Diagnostic::new(
+            f.name_span,
+            format!(
+                "`{}` checks {} to prevent re-initialization but never sets it{note}, so the check always passes",
+                f.name,
+                keys.join(", ")
+            ),
+            confidence,
+        )
+        .in_function(&f.name)
+        .with_help(format!(
+            "Set {} in `{}` (or check a key it does write, such as the admin).",
+            keys.join(", "),
+            f.name
+        )),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +121,34 @@ mod tests {
 
     fn check(src: &str) -> Vec<guard_engine::Finding> {
         run(Box::new(UnprotectedInitializer), src)
+    }
+
+    #[test]
+    fn flags_guard_on_key_never_written() {
+        let f = check(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn initialize(e: Env, admin: Address) {
+        if e.storage().instance().has(&K::Init) { panic!("already") }
+        e.storage().instance().set(&K::Admin, &admin);
+    }
+    pub fn init_ok(e: Env, admin: Address) {
+        if e.storage().instance().has(&K::Admin) { panic!("already") }
+        e.storage().instance().set(&K::Admin, &admin);
+    }
+    pub fn init_flag(e: Env, admin: Address) {
+        if is_init(&e) { panic!("already") }
+        e.storage().instance().set(&K::Initialized, &true);
+        e.storage().instance().set(&K::Admin, &admin);
+    }
+}
+fn is_init(e: &Env) -> bool { e.storage().instance().get(&K::Initialized).unwrap_or(false) }
+"#,
+        );
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(f[0].message.contains("checks `Init`"), "{}", f[0].message);
+        assert_eq!(f[0].confidence, Confidence::High);
     }
 
     #[test]

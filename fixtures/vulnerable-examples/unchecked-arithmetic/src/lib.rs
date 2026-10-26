@@ -27,11 +27,11 @@ impl Staking {
         user.require_auth();
         let balance = read_stake(&env, &user);
         let new_balance = balance + amount; // expect: SG-003
-        env.storage().persistent().set(&DataKey::Stake(user), &new_balance);
+        env.storage().persistent().set(&DataKey::Stake(user), &new_balance); // expect: SG-006, SG-007
 
         let mut total_staked: i128 = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
         total_staked += amount; // expect: SG-003
-        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
+        env.storage().instance().set(&DataKey::TotalStaked, &total_staked); // expect: SG-007
     }
 
     pub fn unstake(env: Env, user: Address, amount: i128) {
@@ -40,13 +40,23 @@ impl Staking {
         let balance = read_stake(&env, &user);
         env.storage()
             .persistent()
-            .set(&DataKey::Stake(user), &(balance - amount)); // expect: SG-003
+            .set(&DataKey::Stake(user), &(balance - amount)); // expect: SG-003, SG-006
     }
 
     pub fn pending_reward(env: Env, user: Address) -> u64 {
         let rate: i128 = env.storage().instance().get(&DataKey::RewardRate).unwrap_or(0);
         let reward = read_stake(&env, &user) * rate / BPS; // expect: SG-003
         reward as u64 // expect: SG-003
+    }
+
+    /// `i128` parameters are token amounts even without an amount-like name.
+    pub fn quote(_env: Env, x: i128, y: i128) -> i128 {
+        x * y // expect: SG-003
+    }
+
+    /// Divides before multiplying: small stakes round down to zero reward.
+    pub fn share(_env: Env, amount: i128, total: i128, pool: i128) -> i128 {
+        amount.checked_div(total).unwrap().checked_mul(pool).unwrap() // expect: SG-003
     }
 
     /// Checked arithmetic: not reported.

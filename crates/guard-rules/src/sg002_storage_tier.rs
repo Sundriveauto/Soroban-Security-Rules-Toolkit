@@ -167,11 +167,72 @@ call and grows with each new key; use persistent storage instead",
                             .in_function(&f.name),
                         );
                     }
+                    Some(StorageTier::Instance) if !w.key_is_parameterised && f.name != "__constructor" => {
+                        if let Some((coll, call)) = growing_collection(f, &cx.model.facts[id], w) {
+                            out.push(
+                                Diagnostic::new(
+                                    w.span,
+                                    format!(
+                                        "Collection `{coll}` stored under instance key `{}` grows with caller-supplied \
+entries (`{coll}.{call}(..)`); the single instance entry is loaded on every call and has a size limit",
+                                        w.key_text
+                                    ),
+                                    Confidence::Medium,
+                                )
+                                .in_function(&f.name)
+                                .with_help(
+                                    "Store each entry under its own persistent key (e.g. `DataKey::Member(addr)`) \
+instead of one growing `Map`/`Vec` in instance storage, or cap its length.",
+                                ),
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
         }
     }
+}
+
+/// For an instance write whose value is a local collection, the local's name and
+/// the growth method when the function adds parameter-derived entries to it
+/// (`m.set(user, amount)`, `list.push_back(addr)`) without checking its length.
+fn growing_collection(
+    f: &guard_parser::FnDef<'_>,
+    facts: &guard_parser::FnFacts,
+    w: &guard_parser::StateWrite,
+) -> Option<(String, String)> {
+    use syn::visit::Visit;
+    struct G<'p> {
+        params: &'p [String],
+        targets: &'p [String],
+        hit: Option<(String, String)>,
+    }
+    impl<'ast> Visit<'ast> for G<'_> {
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            let method = m.method.to_string();
+            if self.hit.is_none() && matches!(method.as_str(), "set" | "push_back" | "push_front" | "insert" | "append")
+            {
+                if let Some(recv) = guard_parser::syntax::as_local_ident(&m.receiver) {
+                    let from_params =
+                        m.args.iter().flat_map(guard_parser::syntax::idents).any(|i| self.params.contains(&i));
+                    if self.targets.contains(&recv) && from_params {
+                        self.hit = Some((recv, method));
+                    }
+                }
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
+    }
+    let targets: Vec<String> = w.value_locals.iter().filter(|v| !facts.len_bounds.contains(v)).cloned().collect();
+    if targets.is_empty() {
+        return None;
+    }
+    let params: Vec<String> = f.params().into_iter().map(|(n, _)| n).collect();
+    let mut g = G { params: &params, targets: &targets, hit: None };
+    g.visit_block(f.block);
+    g.hit
 }
 
 #[cfg(test)]
@@ -203,6 +264,32 @@ fn set_cfg(e: &Env, c: &Config) { e.storage().temporary().set(&DataKey::PoolConf
         assert_eq!(f[0].confidence, Confidence::High);
         assert!(f[0].message.contains("`DataKey::Balance(addr)`"), "{}", f[0].message);
         assert_eq!(f[2].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn flags_growing_collection_in_instance_storage() {
+        let f = check(
+            r#"
+fn register(e: &Env, u: Address, amount: i128) {
+    let mut m: Map<Address, i128> = e.storage().instance().get(&K::Users).unwrap_or(Map::new(e));
+    m.set(u, amount);
+    e.storage().instance().set(&K::Users, &m);
+}
+fn capped(e: &Env, u: Address) {
+    let mut v: Vec<Address> = e.storage().instance().get(&K::List).unwrap();
+    if v.len() >= 10 { panic!() }
+    v.push_back(u);
+    e.storage().instance().set(&K::List, &v);
+}
+fn config(e: &Env, fee: u32) {
+    let mut c: Config = e.storage().instance().get(&K::Cfg).unwrap();
+    c.fee = fee;
+    e.storage().instance().set(&K::Cfg, &c);
+}
+"#,
+        );
+        assert_eq!(lines(&f), vec![5], "{f:#?}");
+        assert!(f[0].message.contains("`m.set(..)`"), "{}", f[0].message);
     }
 
     #[test]

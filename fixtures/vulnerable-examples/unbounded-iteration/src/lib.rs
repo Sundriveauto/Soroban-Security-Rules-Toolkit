@@ -33,7 +33,7 @@ impl Airdrop {
         member.require_auth();
         let mut members = read_members(&env);
         members.push_back(member);
-        env.storage().persistent().set(&DataKey::Members, &members);
+        env.storage().persistent().set(&DataKey::Members, &members); // expect: SG-007
     }
 
     /// Eventually exceeds the transaction budget and can never succeed again.

@@ -45,6 +45,8 @@ impl Rule for UncheckedArithmetic {
         for (_, f) in cx.model.fns_in_file(cx.file_idx) {
             let mut v = ArithVisitor {
                 amount_words: &amount_words,
+                derived: derived_amounts(f, &amount_words),
+                wide_params: wide_int_params(f),
                 overflow_checks,
                 function: &f.name,
                 guarded_pairs: collect_comparisons(f.block),
@@ -105,8 +107,70 @@ fn collect_comparisons(block: &syn::Block) -> HashSet<(String, String)> {
     c.pairs
 }
 
+/// Parameters typed `i128` / `u128`, Soroban's token-amount types.
+fn wide_int_params(f: &guard_parser::FnDef<'_>) -> HashSet<String> {
+    f.params()
+        .into_iter()
+        .filter(|(_, ty)| matches!(guard_parser::syntax::compact(*ty).trim_start_matches('&'), "i128" | "u128"))
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Locals whose initializer is an amount: an amount-named value or call
+/// (`read_balance(&e)`), an `i128`/`u128` parameter, another such local, or
+/// arithmetic on one (`let x = a * 2`). Computed to a fixpoint.
+fn derived_amounts(f: &guard_parser::FnDef<'_>, amount_words: &[String]) -> HashSet<String> {
+    fn is_amount(e: &Expr, words: &[String], known: &HashSet<String>) -> bool {
+        match guard_parser::syntax::strip(e) {
+            Expr::Binary(b) if op_info(&b.op).is_some() || matches!(b.op, BinOp::Div(_)) => {
+                is_amount(&b.left, words, known) || is_amount(&b.right, words, known)
+            }
+            Expr::MethodCall(m)
+                if m.method.to_string().starts_with("checked_") || m.method.to_string().starts_with("saturating_") =>
+            {
+                is_amount(&m.receiver, words, known)
+            }
+            Expr::MethodCall(m)
+                if matches!(m.method.to_string().as_str(), "unwrap" | "expect" | "unwrap_or" | "unwrap_or_default") =>
+            {
+                is_amount(&m.receiver, words, known)
+            }
+            other => {
+                if is_literal(other) {
+                    return false;
+                }
+                operand_name(other)
+                    .is_some_and(|n| !is_constant_name(&n) && (has_word(&n, words) || known.contains(&n)))
+            }
+        }
+    }
+    let bindings = guard_parser::syntax::Bindings::collect(f.block);
+    let mut known = wide_int_params(f);
+    let params = known.clone();
+    let mut derived = HashSet::new();
+    for _ in 0..6 {
+        let mut changed = false;
+        for (name, init) in bindings.iter() {
+            if !known.contains(name) && is_amount(init, amount_words, &known) {
+                known.insert(name.to_string());
+                derived.insert(name.to_string());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    derived.retain(|n| !params.contains(n));
+    derived
+}
+
 struct ArithVisitor<'a> {
     amount_words: &'a [String],
+    /// Locals derived from amounts (see [`derived_amounts`]); inferred, so medium confidence at most.
+    derived: HashSet<String>,
+    /// `i128`/`u128` parameters: treated as amounts even without an amount-like name.
+    wide_params: HashSet<String>,
     overflow_checks: Option<bool>,
     function: &'a str,
     guarded_pairs: HashSet<(String, String)>,
@@ -116,12 +180,21 @@ struct ArithVisitor<'a> {
 }
 
 impl ArithVisitor<'_> {
-    fn amount_operand(&self, e: &Expr) -> Option<String> {
+    /// The operand's name if it looks like a token amount, and whether that is
+    /// only inferred (from an `i128`/`u128` parameter type or a local's initializer).
+    fn amount_operand(&self, e: &Expr) -> Option<(String, bool)> {
         if is_literal(e) {
             return None;
         }
         let name = operand_name(e)?;
-        (has_word(&name, self.amount_words) && !is_constant_name(&name)).then_some(name)
+        if is_constant_name(&name) {
+            return None;
+        }
+        if has_word(&name, self.amount_words) {
+            return Some((name, false));
+        }
+        let is_local = matches!(guard_parser::syntax::strip(e), Expr::Path(p) if p.path.segments.len() == 1);
+        (is_local && (self.wide_params.contains(&name) || self.derived.contains(&name))).then_some((name, true))
     }
 }
 
@@ -137,8 +210,59 @@ fn op_info(op: &BinOp) -> Option<(&'static str, &'static str)> {
     })
 }
 
+impl ArithVisitor<'_> {
+    /// `(a / b) * c` or `a.checked_div(b)…checked_mul(c)` on amounts: the division
+    /// truncates before the multiplication, losing precision.
+    fn check_div_before_mul(&mut self, span: Span, divided: &Expr, factor: &Expr) {
+        let div = match guard_parser::syntax::strip(divided) {
+            Expr::Binary(d) if matches!(d.op, BinOp::Div(_)) => Some((&*d.left, &*d.right)),
+            Expr::MethodCall(m) if m.method == "checked_div" || m.method == "unwrap" || m.method == "expect" => {
+                let inner = if m.method == "checked_div" {
+                    Some(m)
+                } else {
+                    match guard_parser::syntax::strip(&m.receiver) {
+                        Expr::MethodCall(i) if i.method == "checked_div" => Some(i),
+                        _ => None,
+                    }
+                };
+                inner.and_then(|i| i.args.first().map(|a| (&*i.receiver, a)))
+            }
+            _ => None,
+        };
+        let Some((num, den)) = div else { return };
+        let amount = [num, den, factor].into_iter().find_map(|e| self.amount_operand(e));
+        let Some((name, _)) = amount else { return };
+        self.out.push(
+            Diagnostic::new(
+                span,
+                format!("Division before multiplication on token amount `{name}` truncates the intermediate result"),
+                Confidence::Medium,
+            )
+            .in_function(self.function)
+            .with_severity(Severity::Info)
+            .with_help(
+                "Multiply first and divide last (`a * c / b`), using checked or widened arithmetic \
+to avoid overflow, so rounding happens once.",
+            ),
+        );
+    }
+}
+
 impl<'ast> Visit<'ast> for ArithVisitor<'_> {
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        if m.method == "checked_mul" || m.method == "saturating_mul" {
+            if let Some(arg) = m.args.first() {
+                self.check_div_before_mul(Span::of(&m.method), &m.receiver, arg);
+            }
+        }
+        syn::visit::visit_expr_method_call(self, m);
+    }
+
     fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+        if matches!(b.op, BinOp::Mul(_)) {
+            self.check_div_before_mul(Span::of(&b.op), &b.left, &b.right);
+            self.check_div_before_mul(Span::of(&b.op), &b.right, &b.left);
+        }
         let mut reported = false;
         if self.suppress == 0 {
             if let Some((sym, checked)) = op_info(&b.op) {
@@ -154,9 +278,14 @@ impl<'ast> Visit<'ast> for ArithVisitor<'_> {
                 let both_const = [&b.left, &b.right]
                     .iter()
                     .all(|e| is_literal(e) || operand_name(e).is_some_and(|n| is_constant_name(&n)));
-                if let Some(name) = left.or(right) {
+                // Prefer a named amount over one inferred from its type.
+                let pick = match (left, right) {
+                    (Some(l), Some(r)) => Some(if l.1 && !r.1 { r } else { l }),
+                    (l, r) => l.or(r),
+                };
+                if let Some((name, by_type)) = pick {
                     if !guarded && !both_const {
-                        let (confidence, severity, note) = match self.overflow_checks {
+                        let (mut confidence, severity, note) = match self.overflow_checks {
                             Some(true) => (
                                 Confidence::Low,
                                 Some(Severity::Info),
@@ -169,6 +298,9 @@ impl<'ast> Visit<'ast> for ArithVisitor<'_> {
                             ),
                             None => (Confidence::Medium, None, ""),
                         };
+                        if by_type && confidence == Confidence::High {
+                            confidence = Confidence::Medium;
+                        }
                         let mut d = Diagnostic::new(
                             Span::of(&b.op),
                             format!("Unchecked `{sym}` on token amount `{name}`{note}"),
@@ -206,7 +338,7 @@ in `[profile.release]`."
             );
             if narrowing {
                 let range_checked = |n: &String| self.guarded_pairs.contains(&(n.clone(), String::new()));
-                if let Some(name) = self.amount_operand(&c.expr).filter(|n| !range_checked(n)) {
+                if let Some((name, _)) = self.amount_operand(&c.expr).filter(|(n, _)| !range_checked(n)) {
                     self.out.push(
                         Diagnostic::new(
                             Span::of(c),
@@ -304,6 +436,53 @@ fn h(amount: i128) -> u128 { if amount > 0 { amount as u128 } else { 0 } }
 "#,
         );
         assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn flags_i128_params_without_amount_names() {
+        let f = check("fn add(a: i128, b: i128) -> i128 { a + b }\nfn idx(i: u32, n: u32) -> u32 { i + n }");
+        assert_eq!(lines(&f), vec![1]);
+        assert_eq!(f[0].confidence, Confidence::Medium);
+        assert!(f[0].message.contains("`a`"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn flags_division_before_multiplication() {
+        let f = run_with(
+            Box::new(UncheckedArithmetic),
+            r#"
+fn a(amount: i128, total: i128, pool: i128) -> i128 { (amount / total) * pool }
+fn b(amount: i128, total: i128, pool: i128) -> i128 { amount.checked_div(total).unwrap().checked_mul(pool).unwrap() }
+fn c(amount: i128, total: i128, pool: i128) -> i128 { amount.checked_mul(pool).unwrap().checked_div(total).unwrap() }
+fn d(i: u32, n: u32, k: u32) -> u32 { (i / n) * k }
+"#,
+            soroban_crate(Some(true)),
+            &Default::default(),
+        );
+        let div: Vec<_> = f.iter().filter(|x| x.message.contains("Division before multiplication")).collect();
+        assert_eq!(div.iter().map(|x| x.location.start_line).collect::<Vec<_>>(), vec![2, 3], "{f:#?}");
+        assert!(div.iter().all(|x| x.severity == Severity::Info));
+    }
+
+    #[test]
+    fn tracks_amounts_through_locals() {
+        let f = check(
+            r#"
+fn a(e: &Env) -> i128 { let x = read_balance(e); let y = x * 3; y + 1 }
+fn b(items: Vec<u32>) -> u32 { let n = items.len(); n + 1 }
+fn c(e: &Env) -> i128 { let x = read_balance(e).checked_add(1).unwrap(); x - 2 }
+"#,
+        );
+        assert_eq!(lines(&f), vec![2, 2, 4], "{f:#?}");
+        assert!(f.iter().all(|x| x.confidence == Confidence::Medium));
+    }
+
+    #[test]
+    fn named_amount_keeps_high_confidence_next_to_typed_param() {
+        let f = check("fn x(n: i128, amount: i128) -> i128 { n * amount }");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].confidence, Confidence::High);
+        assert!(f[0].message.contains("`amount`"), "{}", f[0].message);
     }
 
     #[test]
