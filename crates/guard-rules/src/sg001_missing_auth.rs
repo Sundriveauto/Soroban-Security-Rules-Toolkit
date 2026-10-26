@@ -133,7 +133,7 @@ impl Rule for MissingAuthorization {
             };
             let message = if partial {
                 format!(
-                    "Exported function `{}` {what}{via}, but authorizes only on some code paths (inside a branch or loop)",
+                    "Exported function `{}` {what}{via}, but authorizes only on some code paths (inside a branch, loop or closure)",
                     f.name
                 )
             } else {

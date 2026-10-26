@@ -733,6 +733,12 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
         self.branch(|s| s.visit_block(&e.body));
     }
 
+    fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+        // A closure may run once, many times (iterator adapters over a possibly
+        // empty collection) or never (stored and not called).
+        self.branch(|s| s.visit_expr(&c.body));
+    }
+
     fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
         self.visit_expr(&e.expr);
         // The body may run zero times.
@@ -883,6 +889,8 @@ mod tests {
                 pub fn arms(e: Env, a: Address, k: u32) { match k { 0 => a.require_auth(), _ => panic!("no") } }
                 pub fn looped(e: Env, xs: Vec<Address>) { for x in xs.iter() { x.require_auth(); } }
                 pub fn helper_in_branch(e: Env, f: bool) { if f { require_owner(&e); } }
+                pub fn closure_iter(e: Env, xs: Vec<Address>) { xs.iter().for_each(|x| x.require_auth()); }
+                pub fn closure_unused(e: Env, a: Address) { let _f = || a.require_auth(); }
             }
         "#,
         );
@@ -896,6 +904,8 @@ mod tests {
         assert_eq!(st("arms"), AuthStatus::Always);
         assert_eq!(st("looped"), AuthStatus::Sometimes);
         assert_eq!(st("helper_in_branch"), AuthStatus::Sometimes);
+        assert_eq!(st("closure_iter"), AuthStatus::Sometimes);
+        assert_eq!(st("closure_unused"), AuthStatus::Sometimes);
     }
 
     #[test]
