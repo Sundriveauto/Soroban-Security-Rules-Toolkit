@@ -189,6 +189,8 @@ pub struct FnFacts {
     pub auth_attr: bool,
     pub state_writes: Vec<StateWrite>,
     pub storage_reads: Vec<Span>,
+    /// Most specific key name of each `get` (`DataKey::Members` → `Members`), when known.
+    pub read_keys: Vec<String>,
     /// Token transfers whose source is the contract itself.
     pub outflows: Vec<Span>,
     /// `update_current_contract_wasm` calls.
@@ -929,6 +931,11 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                 });
             } else if op.kind.is_read() {
                 self.facts.storage_reads.push(span);
+                if op.kind == StorageOpKind::Get {
+                    if let Some(k) = op.key().and_then(|k| crate::syntax::key_names(k, self.bindings).pop()) {
+                        self.facts.read_keys.push(k);
+                    }
+                }
                 if op.kind == StorageOpKind::Has || self.cond_depth > 0 {
                     self.facts.init_guards.push(span);
                 }

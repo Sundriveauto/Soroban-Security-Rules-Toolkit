@@ -134,19 +134,130 @@ fn collect_sources(f: &FnDef<'_>, bindings: &Bindings<'_>, model: &CrateModel<'_
             }
         }
     }
+    let capped = capped_keys(model);
     for (name, init) in bindings.iter() {
-        if expr_loads_storage(init, bindings, model) && !capped_where_written(name, model) {
-            sources.insert(name.to_string(), Source::Storage);
+        if !expr_loads_storage(init, bindings, model) || capped_where_written(name, model) {
+            continue;
         }
+        let keys = loaded_keys(init, bindings, model);
+        if !keys.is_empty() && keys.iter().all(|k| capped.contains(k)) {
+            continue;
+        }
+        sources.insert(name.to_string(), Source::Storage);
     }
     sources
+}
+
+/// Locals whose length a function checks, directly (`if v.len() >= MAX`) or by
+/// passing them to a helper that checks its parameter.
+fn bounded_locals(model: &CrateModel<'_>, id: usize) -> HashSet<String> {
+    let f = &model.facts[id];
+    let mut out: HashSet<String> = f.len_bounds.iter().cloned().collect();
+    for call in &f.calls {
+        for (j, arg) in call.args.iter().enumerate() {
+            let Some(local) = &arg.local else { continue };
+            let checked = model.resolve(id, call).into_iter().any(|callee| {
+                model.param_names(callee).get(j).is_some_and(|p| model.facts[callee].len_bounds.contains(p))
+            });
+            if checked {
+                out.insert(local.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Storage keys (most specific name) whose stored collection is length-checked
+/// where it is written: the written value is built from a bounded local.
+fn capped_keys(model: &CrateModel<'_>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (id, f) in model.facts.iter().enumerate() {
+        if f.state_writes.is_empty() {
+            continue;
+        }
+        let bounded = bounded_locals(model, id);
+        if bounded.is_empty() {
+            continue;
+        }
+        for w in &f.state_writes {
+            if w.value_locals.iter().any(|v| bounded.contains(v)) {
+                if let Some(k) = w.key_idents.last() {
+                    out.insert(k.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Storage keys read by `expr`, directly or through crate helpers it calls.
+fn loaded_keys(expr: &Expr, bindings: &Bindings<'_>, model: &CrateModel<'_>) -> Vec<String> {
+    struct V<'x, 'a, 'm> {
+        bindings: &'x Bindings<'a>,
+        model: &'x CrateModel<'m>,
+        keys: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for V<'_, '_, '_> {
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if let Some(op) = storage_op(m, self.bindings) {
+                if op.kind == guard_parser::StorageOpKind::Get {
+                    if let Some(k) = op.key().and_then(|k| guard_parser::syntax::key_names(k, self.bindings).pop()) {
+                        self.keys.push(k);
+                    }
+                }
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if let Some(name) = call_name(c) {
+                for &id in self.model.by_name(&name) {
+                    // One level of helpers plus whatever they read directly or via witness.
+                    let mut stack = vec![id];
+                    let mut seen = HashSet::new();
+                    while let Some(f) = stack.pop() {
+                        if !seen.insert(f) || seen.len() > 32 {
+                            continue;
+                        }
+                        self.keys.extend(self.model.facts[f].read_keys.iter().cloned());
+                        for call in &self.model.facts[f].calls {
+                            stack.extend(self.model.resolve(f, call));
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    let mut v = V { bindings, model, keys: Vec::new() };
+    v.visit_expr(expr);
+    v.keys.sort();
+    v.keys.dedup();
+    v.keys
 }
 
 /// `true` if some storage-writing function in the crate checks `<name>.len()`
 /// against a bound, i.e. the collection is capped where it grows
 /// (`if modules.len() >= MAX_MODULES { return Err(..) }` before `set`).
+///
+/// The check may also live in a helper the collection is passed to
+/// (`assert_cap(&list)` where `assert_cap` compares `v.len()` to a maximum).
 fn capped_where_written(name: &str, model: &CrateModel<'_>) -> bool {
-    model.facts.iter().any(|f| !f.state_writes.is_empty() && f.len_bounds.iter().any(|n| n == name))
+    model.facts.iter().enumerate().any(|(id, f)| {
+        if f.state_writes.is_empty() {
+            return false;
+        }
+        if f.len_bounds.iter().any(|n| n == name) {
+            return true;
+        }
+        f.calls.iter().any(|call| {
+            call.args.iter().enumerate().any(|(j, arg)| {
+                arg.local.as_deref() == Some(name)
+                    && model.resolve(id, call).into_iter().any(|callee| {
+                        model.param_names(callee).get(j).is_some_and(|p| model.facts[callee].len_bounds.contains(p))
+                    })
+            })
+        })
+    })
 }
 
 /// `true` if `expr` reads from storage directly, or calls a crate helper that
@@ -337,6 +448,80 @@ impl<'ast> Visit<'ast> for LoopVisitor<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cap_checked_where_key_is_written_bounds_reads_under_another_name() {
+        let f = check(
+            r#"
+const MAX: u32 = 10;
+fn topics(e: &Env) -> Vec<u32> { e.storage().persistent().get(&K::Topics).unwrap() }
+#[contractimpl]
+impl C {
+    pub fn add(e: Env, t: u32) {
+        let mut claim_topics = topics(&e);
+        if claim_topics.len() >= MAX { panic!() }
+        claim_topics.push_back(t);
+        e.storage().persistent().set(&K::Topics, &claim_topics);
+    }
+    pub fn sum(e: Env) -> u32 {
+        let issuer_topics = topics(&e);
+        let mut n = 0;
+        for t in issuer_topics.iter() { n += t; }
+        n
+    }
+}
+"#,
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn flags_stored_map_iteration() {
+        let f = check(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn total(e: Env) -> i128 {
+        let m: Map<Address, i128> = e.storage().persistent().get(&K::M).unwrap();
+        m.values().iter().sum()
+    }
+    pub fn count(e: Env) -> u32 {
+        let m: Map<Address, i128> = e.storage().persistent().get(&K::M).unwrap();
+        let mut c = 0;
+        for (_k, _v) in m.iter() { c += 1; }
+        c
+    }
+}
+"#,
+        );
+        assert_eq!(f.len(), 2, "{f:#?}");
+    }
+
+    #[test]
+    fn cap_in_helper_counts_as_bound() {
+        let f = check(
+            r#"
+const MAX: u32 = 10;
+fn assert_cap(v: &Vec<Address>) { if v.len() >= MAX { panic!() } }
+#[contractimpl]
+impl C {
+    pub fn add(e: Env, a: Address) {
+        let mut list: Vec<Address> = e.storage().persistent().get(&K::List).unwrap();
+        assert_cap(&list);
+        list.push_back(a);
+        e.storage().persistent().set(&K::List, &list);
+    }
+    pub fn count(e: Env) -> u32 {
+        let list: Vec<Address> = e.storage().persistent().get(&K::List).unwrap();
+        let mut n = 0;
+        for _x in list.iter() { n += 1; }
+        n
+    }
+}
+"#,
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
     use super::*;
     use crate::test_util::*;
 
