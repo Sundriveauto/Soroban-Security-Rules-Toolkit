@@ -2,7 +2,7 @@
 //! upgrade the contract without any authorization check.
 
 use guard_engine::{Confidence, Diagnostic, Rule, RuleContext, RuleMeta, RuleOption, Severity};
-use guard_parser::{FnFacts, Span, Witness};
+use guard_parser::{AuthStatus, FnFacts, Span, Witness};
 
 use crate::sg005_unprotected_init::is_initializer_name;
 use crate::util::{has_word, word_set};
@@ -84,7 +84,8 @@ impl Rule for MissingAuthorization {
             {
                 continue;
             }
-            if model.performs_auth(id) {
+            let auth = model.auth_status(id);
+            if auth == AuthStatus::Always {
                 continue;
             }
 
@@ -109,19 +110,35 @@ impl Rule for MissingAuthorization {
                 });
             let Some((kind, witness)) = found else { continue };
 
-            let (what, confidence) = match kind {
+            let (what, mut confidence) = match kind {
                 Sensitive::Upgrade => ("upgrades the contract WASM", Confidence::High),
                 Sensitive::Outflow => ("transfers tokens out of the contract", Confidence::High),
                 Sensitive::PrivilegedWrite => ("modifies privileged configuration", Confidence::High),
                 Sensitive::Write if f.takes_address() => ("writes contract storage", Confidence::Medium),
                 Sensitive::Write => ("writes contract storage", Confidence::Low),
             };
+            let partial = auth == AuthStatus::Sometimes;
+            if partial {
+                // A plain write behind conditional auth is usually a deliberate
+                // "authorize only when needed" pattern; don't report it.
+                if matches!(kind, Sensitive::Write) {
+                    continue;
+                }
+                confidence = Confidence::Medium;
+            }
             let via = if witness.via.is_empty() {
                 String::new()
             } else {
                 format!(" (via `{}`)", witness.via.join("` → `"))
             };
-            let message = format!("Exported function `{}` {what}{via} without an authorization check", f.name);
+            let message = if partial {
+                format!(
+                    "Exported function `{}` {what}{via}, but authorizes only on some code paths (inside a branch or loop)",
+                    f.name
+                )
+            } else {
+                format!("Exported function `{}` {what}{via} without an authorization check", f.name)
+            };
             let mut d = Diagnostic::new(witness.span, message, confidence).in_function(&f.name);
             if confidence == Confidence::Low {
                 // A plain storage write with no address involved (e.g. a public counter) is

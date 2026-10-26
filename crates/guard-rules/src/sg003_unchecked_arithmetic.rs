@@ -45,6 +45,7 @@ impl Rule for UncheckedArithmetic {
         for (_, f) in cx.model.fns_in_file(cx.file_idx) {
             let mut v = ArithVisitor {
                 amount_words: &amount_words,
+                wide_params: wide_int_params(f),
                 overflow_checks,
                 function: &f.name,
                 guarded_pairs: collect_comparisons(f.block),
@@ -105,8 +106,19 @@ fn collect_comparisons(block: &syn::Block) -> HashSet<(String, String)> {
     c.pairs
 }
 
+/// Parameters typed `i128` / `u128`, Soroban's token-amount types.
+fn wide_int_params(f: &guard_parser::FnDef<'_>) -> HashSet<String> {
+    f.params()
+        .into_iter()
+        .filter(|(_, ty)| matches!(guard_parser::syntax::compact(*ty).trim_start_matches('&'), "i128" | "u128"))
+        .map(|(n, _)| n)
+        .collect()
+}
+
 struct ArithVisitor<'a> {
     amount_words: &'a [String],
+    /// `i128`/`u128` parameters: treated as amounts even without an amount-like name.
+    wide_params: HashSet<String>,
     overflow_checks: Option<bool>,
     function: &'a str,
     guarded_pairs: HashSet<(String, String)>,
@@ -116,12 +128,21 @@ struct ArithVisitor<'a> {
 }
 
 impl ArithVisitor<'_> {
-    fn amount_operand(&self, e: &Expr) -> Option<String> {
+    /// The operand's name if it looks like a token amount, and whether that is
+    /// only inferred from its `i128`/`u128` parameter type.
+    fn amount_operand(&self, e: &Expr) -> Option<(String, bool)> {
         if is_literal(e) {
             return None;
         }
         let name = operand_name(e)?;
-        (has_word(&name, self.amount_words) && !is_constant_name(&name)).then_some(name)
+        if is_constant_name(&name) {
+            return None;
+        }
+        if has_word(&name, self.amount_words) {
+            return Some((name, false));
+        }
+        let is_param = matches!(guard_parser::syntax::strip(e), Expr::Path(p) if p.path.segments.len() == 1);
+        (is_param && self.wide_params.contains(&name)).then_some((name, true))
     }
 }
 
@@ -154,9 +175,14 @@ impl<'ast> Visit<'ast> for ArithVisitor<'_> {
                 let both_const = [&b.left, &b.right]
                     .iter()
                     .all(|e| is_literal(e) || operand_name(e).is_some_and(|n| is_constant_name(&n)));
-                if let Some(name) = left.or(right) {
+                // Prefer a named amount over one inferred from its type.
+                let pick = match (left, right) {
+                    (Some(l), Some(r)) => Some(if l.1 && !r.1 { r } else { l }),
+                    (l, r) => l.or(r),
+                };
+                if let Some((name, by_type)) = pick {
                     if !guarded && !both_const {
-                        let (confidence, severity, note) = match self.overflow_checks {
+                        let (mut confidence, severity, note) = match self.overflow_checks {
                             Some(true) => (
                                 Confidence::Low,
                                 Some(Severity::Info),
@@ -169,6 +195,9 @@ impl<'ast> Visit<'ast> for ArithVisitor<'_> {
                             ),
                             None => (Confidence::Medium, None, ""),
                         };
+                        if by_type && confidence == Confidence::High {
+                            confidence = Confidence::Medium;
+                        }
                         let mut d = Diagnostic::new(
                             Span::of(&b.op),
                             format!("Unchecked `{sym}` on token amount `{name}`{note}"),
@@ -206,7 +235,7 @@ in `[profile.release]`."
             );
             if narrowing {
                 let range_checked = |n: &String| self.guarded_pairs.contains(&(n.clone(), String::new()));
-                if let Some(name) = self.amount_operand(&c.expr).filter(|n| !range_checked(n)) {
+                if let Some((name, _)) = self.amount_operand(&c.expr).filter(|(n, _)| !range_checked(n)) {
                     self.out.push(
                         Diagnostic::new(
                             Span::of(c),
@@ -304,6 +333,22 @@ fn h(amount: i128) -> u128 { if amount > 0 { amount as u128 } else { 0 } }
 "#,
         );
         assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn flags_i128_params_without_amount_names() {
+        let f = check("fn add(a: i128, b: i128) -> i128 { a + b }\nfn idx(i: u32, n: u32) -> u32 { i + n }");
+        assert_eq!(lines(&f), vec![1]);
+        assert_eq!(f[0].confidence, Confidence::Medium);
+        assert!(f[0].message.contains("`a`"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn named_amount_keeps_high_confidence_next_to_typed_param() {
+        let f = check("fn x(n: i128, amount: i128) -> i128 { n * amount }");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].confidence, Confidence::High);
+        assert!(f[0].message.contains("`amount`"), "{}", f[0].message);
     }
 
     #[test]

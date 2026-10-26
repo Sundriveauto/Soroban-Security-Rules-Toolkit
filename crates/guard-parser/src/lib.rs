@@ -13,6 +13,6 @@ pub mod syntax;
 
 pub use cargo::CrateInfo;
 pub use discover::{DiscoverError, DiscoverOptions};
-pub use model::{CallSite, CrateModel, FnDef, FnFacts, FnId, FnKind, ModelOptions, StateWrite, Witness};
+pub use model::{AuthStatus, CallSite, CrateModel, FnDef, FnFacts, FnId, FnKind, ModelOptions, StateWrite, Witness};
 pub use project::{LoadError, ParseFailure, Project, SourceFile};
 pub use syntax::{LineCol, Span, StorageOp, StorageOpKind, StorageTier};

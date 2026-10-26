@@ -49,6 +49,11 @@ impl Staking {
         reward as u64 // expect: SG-003
     }
 
+    /// `i128` parameters are token amounts even without an amount-like name.
+    pub fn quote(_env: Env, x: i128, y: i128) -> i128 {
+        x * y // expect: SG-003
+    }
+
     /// Checked arithmetic: not reported.
     pub fn stake_checked(env: Env, user: Address, amount: i128) {
         user.require_auth();

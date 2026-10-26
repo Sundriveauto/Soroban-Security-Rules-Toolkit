@@ -7,6 +7,18 @@ are listed under **Changed**.
 
 ## [Unreleased]
 
+### Changed
+
+- SG-001 no longer trusts a helper because of its name alone (`require_admin`, `check_owner_auth`, …)
+  when the crate defines it: the helper's body must actually authorize. Names are still trusted for
+  helpers defined outside the crate.
+- SG-001 reports upgrades, outflows and privileged writes whose only authorization runs on some code
+  paths (inside an `if` without `else`, one `match` arm, or a loop body) with medium confidence.
+- SG-003 treats `i128` / `u128` function parameters as token amounts regardless of name (medium
+  confidence at most).
+- Real-world baseline (`docs/validation.md`): no change on soroban-examples; one extra `info` finding
+  on OpenZeppelin stellar-contracts.
+
 ## [0.1.0] - 2026-10-26
 
 ### Added

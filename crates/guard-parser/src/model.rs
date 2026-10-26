@@ -102,13 +102,32 @@ pub struct CallSite {
     pub is_method: bool,
     /// Call appears inside a condition (`if`, `match`, `assert!` …).
     pub in_condition: bool,
+    /// Call runs on only some paths: inside an `if` / `match` arm or a `for` / `while` body.
+    pub in_branch: bool,
+    /// The callee's name looks like an authorization helper (`require_admin`, `check_owner_auth`).
+    /// Trusted only when the crate does not define the helper; otherwise its body is checked.
+    pub auth_named: bool,
+}
+
+/// How reliably a function performs an authorization check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AuthStatus {
+    /// No authorization on any path.
+    Never,
+    /// Authorization happens on some paths only (e.g. inside an `if`).
+    Sometimes,
+    /// Authorization happens on every path that reaches the end of the function.
+    Always,
 }
 
 /// Security-relevant facts collected directly from one function body.
 #[derive(Debug, Clone, Default)]
 pub struct FnFacts {
-    /// `require_auth` / `require_auth_for_args` calls and recognised auth helpers.
+    /// Authorization checks that run on every path: `require_auth` /
+    /// `require_auth_for_args`, configured `auth-functions` and auth macros.
     pub auth: Vec<Span>,
+    /// Authorization checks that run on some paths only (inside a branch or loop body).
+    pub cond_auth: Vec<Span>,
     /// The function carries an access-control attribute such as `#[only_owner]`.
     pub auth_attr: bool,
     pub state_writes: Vec<StateWrite>,
@@ -257,16 +276,49 @@ impl<'a> CrateModel<'a> {
         None
     }
 
-    /// `true` if `id` or anything it calls performs an authorization check.
+    /// `true` if `id` or anything it calls performs an authorization check on at least one path.
     pub fn performs_auth(&self, id: FnId) -> bool {
-        self.witness(id, &|def, f| {
-            if f.auth_attr || def.attrs.iter().any(is_auth_attr) {
-                Some(def.name_span)
+        self.auth_status(id) != AuthStatus::Never
+    }
+
+    /// Whether `id`, directly or through the helpers it calls, authorizes on
+    /// every path, on some paths, or never.
+    ///
+    /// Helpers whose names look like auth checks are followed into their bodies
+    /// when the crate defines them, so an empty `fn check_admin() {}` does not count.
+    pub fn auth_status(&self, id: FnId) -> AuthStatus {
+        let mut visited = HashSet::new();
+        self.auth_status_inner(id, &mut visited)
+    }
+
+    fn auth_status_inner(&self, id: FnId, visited: &mut HashSet<FnId>) -> AuthStatus {
+        if !visited.insert(id) {
+            return AuthStatus::Never;
+        }
+        let def = &self.fns[id];
+        let facts = &self.facts[id];
+        if facts.auth_attr || def.attrs.iter().any(is_auth_attr) || !facts.auth.is_empty() {
+            return AuthStatus::Always;
+        }
+        let mut best = if facts.cond_auth.is_empty() { AuthStatus::Never } else { AuthStatus::Sometimes };
+        for call in &facts.calls {
+            let callees = self.resolve(call);
+            let status = if callees.is_empty() {
+                if call.auth_named {
+                    AuthStatus::Always
+                } else {
+                    AuthStatus::Never
+                }
             } else {
-                f.auth.first().copied()
+                callees.iter().map(|&c| self.auth_status_inner(c, visited)).max().unwrap_or(AuthStatus::Never)
+            };
+            let status = if call.in_branch { status.min(AuthStatus::Sometimes) } else { status };
+            if status == AuthStatus::Always {
+                return AuthStatus::Always;
             }
-        })
-        .is_some()
+            best = best.max(status);
+        }
+        best
     }
 
     /// `true` if `id` or anything it calls reads contract storage.
@@ -338,6 +390,27 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a
     }
 }
 
+/// `true` if an expression always leaves the function: `panic!`, `return`, a
+/// `panic_with_error!` call, or a block ending in one of those.
+fn diverges(expr: &Expr) -> bool {
+    match crate::syntax::strip(expr) {
+        Expr::Return(_) => true,
+        Expr::Macro(m) => {
+            let n = macro_name(&m.mac);
+            matches!(n.as_str(), "panic" | "panic_with_error" | "unreachable" | "unimplemented" | "todo")
+        }
+        Expr::Block(b) => b.block.stmts.last().is_some_and(|s| match s {
+            syn::Stmt::Expr(e, _) => diverges(e),
+            syn::Stmt::Macro(m) => {
+                let n = macro_name(&m.mac);
+                matches!(n.as_str(), "panic" | "panic_with_error" | "unreachable" | "unimplemented" | "todo")
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
     let bindings = Bindings::collect(def.block);
     let mut v = FactsVisitor {
@@ -345,6 +418,7 @@ fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
         opts,
         facts: FnFacts { auth_attr: def.attrs.iter().any(is_auth_attr), ..Default::default() },
         cond_depth: 0,
+        branch_depth: 0,
     };
     v.visit_block(def.block);
     v.facts
@@ -355,6 +429,8 @@ struct FactsVisitor<'b, 'a> {
     opts: &'b ModelOptions,
     facts: FnFacts,
     cond_depth: usize,
+    /// > 0 inside code that runs on some paths only.
+    branch_depth: usize,
 }
 
 impl FactsVisitor<'_, '_> {
@@ -362,6 +438,43 @@ impl FactsVisitor<'_, '_> {
         self.cond_depth += 1;
         f(self);
         self.cond_depth -= 1;
+    }
+
+    fn branch<F: FnOnce(&mut Self)>(&mut self, f: F) {
+        self.branch_depth += 1;
+        f(self);
+        self.branch_depth -= 1;
+    }
+
+    /// Records a direct authorization check, conditional or not.
+    fn push_auth(&mut self, span: Span) {
+        if self.branch_depth > 0 {
+            self.facts.cond_auth.push(span);
+        } else {
+            self.facts.auth.push(span);
+        }
+    }
+
+    fn push_call(&mut self, name: String, span: Span, is_method: bool) {
+        let auth_named = is_auth_helper_name(&name, &[]);
+        self.facts.calls.push(CallSite {
+            name,
+            span,
+            is_method,
+            in_condition: self.cond_depth > 0,
+            in_branch: self.branch_depth > 0,
+            auth_named,
+        });
+    }
+
+    /// When every alternative of an `if`/`else` or `match` performs a direct
+    /// auth check, the check runs on every path.
+    fn promote_if_exhaustive(&mut self, all_branches_auth: bool, first: Option<Span>) {
+        if all_branches_auth && self.branch_depth == 0 {
+            if let Some(span) = first {
+                self.facts.auth.push(span);
+            }
+        }
     }
 
     fn expr_reads_storage(&self, expr: &Expr) -> bool {
@@ -388,7 +501,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
         let name = m.method.to_string();
         let span = Span::of(&m.method);
         match name.as_str() {
-            "require_auth" | "require_auth_for_args" => self.facts.auth.push(span),
+            "require_auth" | "require_auth_for_args" => self.push_auth(span),
             "update_current_contract_wasm" => self.facts.upgrades.push(span),
             "transfer" | "transfer_from" => {
                 let from_contract = m
@@ -437,10 +550,10 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                     self.facts.init_guards.push(span);
                 }
             }
-        } else if is_auth_helper_name(&name, &self.opts.auth_functions) {
-            self.facts.auth.push(span);
-        } else {
-            self.facts.calls.push(CallSite { name, span, is_method: true, in_condition: self.cond_depth > 0 });
+        } else if self.opts.auth_functions.contains(&name) {
+            self.push_auth(span);
+        } else if !matches!(name.as_str(), "require_auth" | "require_auth_for_args") {
+            self.push_call(name, span, true);
         }
         syn::visit::visit_expr_method_call(self, m);
     }
@@ -448,10 +561,10 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
     fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
         if let Some(name) = call_name(c) {
             let span = Span::of(&c.func);
-            if is_auth_helper_name(&name, &self.opts.auth_functions) {
-                self.facts.auth.push(span);
+            if self.opts.auth_functions.contains(&name) {
+                self.push_auth(span);
             } else {
-                self.facts.calls.push(CallSite { name, span, is_method: false, in_condition: self.cond_depth > 0 });
+                self.push_call(name, span, false);
             }
         }
         syn::visit::visit_expr_call(self, c);
@@ -459,25 +572,46 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
         self.condition(|s| s.visit_expr(&e.cond));
-        self.visit_block(&e.then_branch);
+        let before = self.facts.cond_auth.len();
+        self.branch(|s| s.visit_block(&e.then_branch));
+        let after_then = self.facts.cond_auth.len();
+        let mut all = after_then > before;
         if let Some((_, els)) = &e.else_branch {
-            self.visit_expr(els);
+            self.branch(|s| s.visit_expr(els));
+            all &= self.facts.cond_auth.len() > after_then;
+        } else {
+            all = false;
         }
+        let first = self.facts.cond_auth.get(before).copied();
+        self.promote_if_exhaustive(all, first);
     }
 
     fn visit_expr_match(&mut self, e: &'ast syn::ExprMatch) {
         self.condition(|s| s.visit_expr(&e.expr));
+        let before = self.facts.cond_auth.len();
+        let mut all = !e.arms.is_empty();
         for arm in &e.arms {
             if let Some((_, g)) = &arm.guard {
                 self.condition(|s| s.visit_expr(g));
             }
-            self.visit_expr(&arm.body);
+            let n = self.facts.cond_auth.len();
+            self.branch(|s| s.visit_expr(&arm.body));
+            // An arm that diverges (`panic!`, `return`) need not authorize.
+            all &= self.facts.cond_auth.len() > n || diverges(&arm.body);
         }
+        let first = self.facts.cond_auth.get(before).copied();
+        self.promote_if_exhaustive(all, first);
     }
 
     fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
         self.condition(|s| s.visit_expr(&e.cond));
-        self.visit_block(&e.body);
+        self.branch(|s| s.visit_block(&e.body));
+    }
+
+    fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
+        self.visit_expr(&e.expr);
+        // The body may run zero times.
+        self.branch(|s| s.visit_block(&e.body));
     }
 
     fn visit_local(&mut self, local: &'ast syn::Local) {
@@ -506,8 +640,9 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         let name = macro_name(mac);
+        // Macros are not expanded, so an auth-like macro name is trusted.
         if is_auth_helper_name(&name, &self.opts.auth_functions) {
-            self.facts.auth.push(Span::of(&mac.path));
+            self.push_auth(Span::of(&mac.path));
         }
         let args = macro_args(mac);
         if is_assert_macro(&name) {
@@ -605,6 +740,45 @@ mod tests {
         assert!(m.has_init_guard(id("b")));
         assert!(!m.has_init_guard(id("c")));
         assert!(m.has_init_guard(id("d")));
+    }
+
+    #[test]
+    fn auth_status_tracks_branches_and_helper_bodies() {
+        let p = project(
+            r#"
+            fn require_admin(e: &Env) {}
+            fn require_owner(e: &Env) { let o: Address = e.storage().instance().get(&K::Owner).unwrap(); o.require_auth(); }
+            #[contractimpl]
+            impl C {
+                pub fn fake(e: Env) { require_admin(&e); }
+                pub fn real(e: Env) { require_owner(&e); }
+                pub fn external(e: Env) { require_operator_auth(&e); }
+                pub fn half(e: Env, a: Address, f: bool) { if f { a.require_auth(); } }
+                pub fn both(e: Env, a: Address, b: Address, f: bool) { if f { a.require_auth(); } else { b.require_auth(); } }
+                pub fn arms(e: Env, a: Address, k: u32) { match k { 0 => a.require_auth(), _ => panic!("no") } }
+                pub fn looped(e: Env, xs: Vec<Address>) { for x in xs.iter() { x.require_auth(); } }
+                pub fn helper_in_branch(e: Env, f: bool) { if f { require_owner(&e); } }
+            }
+        "#,
+        );
+        let m = CrateModel::build(&p, 0, &ModelOptions::default());
+        let st = |n: &str| m.auth_status(m.by_name(n)[0]);
+        assert_eq!(st("fake"), AuthStatus::Never);
+        assert_eq!(st("real"), AuthStatus::Always);
+        assert_eq!(st("external"), AuthStatus::Always, "undefined auth-named helpers are trusted");
+        assert_eq!(st("half"), AuthStatus::Sometimes);
+        assert_eq!(st("both"), AuthStatus::Always);
+        assert_eq!(st("arms"), AuthStatus::Always);
+        assert_eq!(st("looped"), AuthStatus::Sometimes);
+        assert_eq!(st("helper_in_branch"), AuthStatus::Sometimes);
+    }
+
+    #[test]
+    fn configured_auth_functions_are_trusted() {
+        let p = project("#[contractimpl] impl C { pub fn a(e: Env) { gate(&e); } }");
+        let opts = ModelOptions { auth_functions: vec!["gate".into()] };
+        let m = CrateModel::build(&p, 0, &opts);
+        assert_eq!(m.auth_status(0), AuthStatus::Always);
     }
 
     #[test]

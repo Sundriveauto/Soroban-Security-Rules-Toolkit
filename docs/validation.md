@@ -7,7 +7,7 @@ This page records the results so precision regressions are visible.
 | Repository | Commit | Files | warning | info |
 |---|---|---|---|---|
 | [stellar/soroban-examples](https://github.com/stellar/soroban-examples) | `03d42aa` (2026-10-06) | 112 | 3 | 37 |
-| [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 25 | 27 |
+| [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 25 | 28 |
 
 Command: `stellar-guard scan <repo> --no-config` (defaults: tests excluded, all rules).
 
@@ -27,7 +27,7 @@ Command: `stellar-guard scan <repo> --no-config` (defaults: tests excluded, all 
 |---|---|---|
 | SG-001 | 5 | 3 |
 | SG-002 | 6 | 0 |
-| SG-003 | 0 | 21 |
+| SG-003 | 0 | 22 |
 | SG-004 | 14 | 3 |
 | SG-005 | 0 | 0 |
 

@@ -22,6 +22,11 @@ fn read_balance(env: &Env, user: &Address) -> i128 {
         .unwrap_or(0)
 }
 
+/// Looks like an access check but never calls `require_auth`.
+fn require_admin(env: &Env) {
+    let _admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+}
+
 fn write_balance(env: &Env, user: &Address, amount: i128) {
     env.storage()
         .persistent()
@@ -70,6 +75,21 @@ impl Vault {
     /// Anyone can overwrite anyone's balance (write happens in a helper).
     pub fn credit(env: Env, user: Address, amount: i128) {
         write_balance(&env, &user, amount); // expect: SG-001
+    }
+
+    /// The helper's name suggests an admin check, but its body does not authorize.
+    pub fn set_token(env: Env, token: Address) {
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Token, &token); // expect: SG-001
+    }
+
+    /// Authorization only happens when `notify` is set; otherwise anyone can withdraw for `user`.
+    pub fn withdraw_to(env: Env, user: Address, amount: i128, notify: bool) {
+        if notify {
+            user.require_auth();
+        }
+        let client = token::Client::new(&env, &read_token(&env));
+        client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001
     }
 
     /// Read-only: not reported.
