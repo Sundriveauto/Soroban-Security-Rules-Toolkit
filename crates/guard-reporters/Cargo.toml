@@ -1,0 +1,23 @@
+[package]
+name = "guard-reporters"
+description = "Text, JSON, SARIF, GitHub and Markdown reporters for stellar-guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+guard-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+guard-parser.workspace = true
+
+[lints]
+workspace = true

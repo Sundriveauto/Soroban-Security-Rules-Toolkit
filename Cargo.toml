@@ -4,6 +4,7 @@ members = [
     "crates/guard-parser",
     "crates/guard-engine",
     "crates/guard-rules",
+    "crates/guard-reporters",
 ]
 # Fixture contracts are scan inputs, not workspace members.
 exclude = ["fixtures"]
