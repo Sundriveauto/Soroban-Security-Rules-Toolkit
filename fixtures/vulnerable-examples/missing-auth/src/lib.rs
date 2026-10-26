@@ -92,6 +92,18 @@ impl Vault {
         client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001
     }
 
+    /// The caller authorizes, but the balance debited belongs to `from`.
+    pub fn move_balance(env: Env, caller: Address, from: Address, amount: i128) {
+        caller.require_auth();
+        let balance = read_balance(&env, &from);
+        if balance < amount {
+            panic!("insufficient balance");
+        }
+        write_balance(&env, &from, balance - amount); // expect: SG-001
+        let credited = read_balance(&env, &caller).checked_add(amount).expect("overflow");
+        write_balance(&env, &caller, credited);
+    }
+
     /// Read-only: not reported.
     pub fn balance(env: Env, user: Address) -> i128 {
         read_balance(&env, &user)

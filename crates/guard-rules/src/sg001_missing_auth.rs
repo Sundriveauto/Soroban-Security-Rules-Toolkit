@@ -85,6 +85,11 @@ impl Rule for MissingAuthorization {
                 continue;
             }
             let auth = model.auth_status(id);
+            if auth != AuthStatus::Never {
+                if let Some(d) = wrong_subject(model, id, f) {
+                    out.push(d);
+                }
+            }
             if auth == AuthStatus::Always {
                 continue;
             }
@@ -150,6 +155,51 @@ impl Rule for MissingAuthorization {
     }
 }
 
+/// Reports a balance debit keyed by an address parameter that never authorizes,
+/// when every authorization in the function is on *other* caller-chosen addresses
+/// (`caller.require_auth(); spend_balance(&e, &victim, amount)`).
+///
+/// Not reported when some authorization targets a stored admin or an opaque
+/// helper (admin clawback), or when another debit is keyed by both the debited
+/// and an authorized address (allowance spending in `transfer_from`).
+fn wrong_subject(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_parser::FnDef<'_>) -> Option<Diagnostic> {
+    let auth = model.subject_auth(id);
+    if auth.other || auth.params.is_empty() {
+        return None;
+    }
+    let params = f.params();
+    let is_address = |i: usize| {
+        params.get(i).is_some_and(|(_, ty)| guard_parser::syntax::idents(*ty).iter().any(|t| t == "Address"))
+    };
+    let debits = model.debits(id);
+    for d in &debits {
+        let Some(&victim) = d.key_params.iter().find(|&&i| is_address(i) && !auth.params.contains(&i)) else {
+            continue;
+        };
+        if d.key_params.iter().any(|i| auth.params.contains(i)) {
+            continue;
+        }
+        let delegated = debits
+            .iter()
+            .any(|o| o.key_params.contains(&victim) && o.key_params.iter().any(|i| auth.params.contains(i)));
+        if delegated {
+            continue;
+        }
+        let names: Vec<String> = auth.params.iter().map(|&i| format!("`{}`", params[i].0)).collect();
+        let message = format!(
+            "Exported function `{}` decreases a value keyed by `{}`, but only {} authorizes",
+            f.name,
+            params[victim].0,
+            names.join(", ")
+        );
+        return Some(Diagnostic::new(d.span, message, Confidence::Medium).in_function(&f.name).with_help(format!(
+            "Call `{}.require_auth()` before debiting it, or check an allowance granted by `{}` to the caller.",
+            params[victim].0, params[victim].0
+        )));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +211,58 @@ mod tests {
     }
 
     // ---- true positives -------------------------------------------------
+
+    const LEDGER: &str = r#"
+fn bal(e: &Env, a: &Address) -> i128 { e.storage().persistent().get(&K::Bal(a.clone())).unwrap_or(0) }
+fn put(e: &Env, a: &Address, v: i128) { e.storage().persistent().set(&K::Bal(a.clone()), &v); }
+fn spend(e: &Env, a: Address, amount: i128) { let b = bal(e, &a); if b < amount { panic!() } put(e, &a, b - amount); }
+fn spend_allowance(e: &Env, from: Address, spender: Address, amount: i128) {
+    let cur: i128 = e.storage().temporary().get(&K::Allow(from.clone(), spender.clone())).unwrap_or(0);
+    let v = Allowance { amount: cur - amount };
+    e.storage().temporary().set(&K::Allow(from, spender), &v);
+}
+"#;
+
+    #[test]
+    fn flags_debit_of_unauthorized_address() {
+        let src = format!(
+            "{LEDGER}#[contractimpl] impl T {{
+    pub fn steal(e: Env, caller: Address, victim: Address, amount: i128) {{
+        caller.require_auth();
+        spend(&e, victim, amount);
+    }}
+}}"
+        );
+        let f = check(&src);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(f[0].message.contains("keyed by `victim`, but only `caller` authorizes"), "{}", f[0].message);
+        assert_eq!(f[0].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn debit_patterns_that_are_authorized() {
+        let src = format!(
+            "{LEDGER}#[contractimpl] impl T {{
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {{
+        from.require_auth();
+        spend(&e, from.clone(), amount);
+        put(&e, &to, bal(&e, &to).checked_add(amount).unwrap());
+    }}
+    pub fn transfer_from(e: Env, spender: Address, from: Address, to: Address, amount: i128) {{
+        spender.require_auth();
+        spend_allowance(&e, from.clone(), spender, amount);
+        spend(&e, from, amount);
+    }}
+    pub fn clawback(e: Env, from: Address, amount: i128) {{
+        let admin: Address = e.storage().instance().get(&K::Admin).unwrap();
+        admin.require_auth();
+        spend(&e, from, amount);
+    }}
+}}"
+        );
+        let f = check(&src);
+        assert!(f.is_empty(), "{f:#?}");
+    }
 
     #[test]
     fn flags_withdraw_without_auth() {

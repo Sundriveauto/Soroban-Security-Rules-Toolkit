@@ -4,7 +4,7 @@
 //! contract function, or anything it calls, perform `require_auth`?" without
 //! each rule re-implementing call-graph traversal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use syn::visit::Visit;
 use syn::{Attribute, Block, Expr, Signature};
@@ -14,6 +14,9 @@ use crate::syntax::{
     attr_is, call_name, idents, is_assert_macro, macro_args, macro_name, resolved_idents, storage_op, words, Bindings,
     Span, StorageOpKind, StorageTier,
 };
+
+/// How deep helper chains are followed by path-sensitive queries.
+const MAX_DEPTH: usize = 16;
 
 /// Index of a function in [`CrateModel::fns`].
 pub type FnId = usize;
@@ -84,6 +87,14 @@ pub struct StateWrite {
     pub key_is_parameterised: bool,
     /// The key expression as written (after resolving a local variable once).
     pub key_text: String,
+    /// Lowercase local names (parameters or locals) used inside the key, e.g. `user` in
+    /// `DataKey::Balance(user.clone())`.
+    pub key_locals: Vec<String>,
+    /// Lowercase locals the stored value is built from, following local bindings
+    /// (`let v = Allowance { amount, .. }; set(&k, &v)` → `amount`, `v`).
+    pub value_locals: Vec<String>,
+    /// The stored value is computed by subtraction (`b - amount`, `b.checked_sub(amount)`).
+    pub value_decreasing: bool,
 }
 
 impl StateWrite {
@@ -109,8 +120,8 @@ pub struct CallSite {
     /// For path calls, the segment before the name: `a` in `a::f()`, `Self` in `Self::f()`,
     /// `Trait` in `<T as Trait>::f()`.
     pub qualifier: Option<String>,
-    /// Identifiers passed as arguments (locals and parameters, references stripped).
-    pub arg_idents: Vec<String>,
+    /// Arguments in order (receiver excluded for method calls).
+    pub args: Vec<CallArg>,
     /// Call appears inside a condition (`if`, `match`, `assert!` …).
     pub in_condition: bool,
     /// Call runs on only some paths: inside an `if` / `match` arm or a `for` / `while` body.
@@ -118,6 +129,35 @@ pub struct CallSite {
     /// The callee's name looks like an authorization helper (`require_admin`, `check_owner_auth`).
     /// Trusted only when the crate does not define the helper; otherwise its body is checked.
     pub auth_named: bool,
+}
+
+/// Which parameters a function authorizes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectAuth {
+    /// Indices (into [`FnDef::params`]) of parameters on which `require_auth` is called,
+    /// directly or by a helper they are passed to.
+    pub params: BTreeSet<usize>,
+    /// Some authorization targets something other than a parameter: a stored admin,
+    /// an auth helper whose body is unknown, or an access-control attribute.
+    pub other: bool,
+}
+
+/// A storage write that decreases a value keyed by parameters of the queried function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Debit {
+    /// The write, or the call leading to it.
+    pub span: Span,
+    /// Indices of the queried function's parameters used in the key.
+    pub key_params: BTreeSet<usize>,
+}
+
+/// One argument of a call.
+#[derive(Debug, Clone, Default)]
+pub struct CallArg {
+    /// The local or parameter passed, with `&`, `.clone()` and similar stripped.
+    pub local: Option<String>,
+    /// The argument is computed by subtraction (`balance - amount`).
+    pub decreasing: bool,
 }
 
 /// How reliably a function performs an authorization check.
@@ -139,6 +179,11 @@ pub struct FnFacts {
     pub auth: Vec<Span>,
     /// Authorization checks that run on some paths only (inside a branch or loop body).
     pub cond_auth: Vec<Span>,
+    /// Receivers of `require_auth` / `require_auth_for_args` calls, when they are plain
+    /// locals or parameters (`from` in `from.require_auth()`). `None` for other receivers.
+    pub auth_subjects: Vec<Option<String>>,
+    /// Arguments of `require_auth_for_args` calls, as local names mentioned in them.
+    pub auth_for_args: Vec<(Span, Vec<String>)>,
     /// The function carries an access-control attribute such as `#[only_owner]`.
     pub auth_attr: bool,
     pub state_writes: Vec<StateWrite>,
@@ -347,10 +392,16 @@ impl<'a> CrateModel<'a> {
         self.auth_status_inner(id, &mut visited)
     }
 
-    fn auth_status_inner(&self, id: FnId, visited: &mut HashSet<FnId>) -> AuthStatus {
-        if !visited.insert(id) {
+    fn auth_status_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> AuthStatus {
+        if stack.len() > MAX_DEPTH || !stack.insert(id) {
             return AuthStatus::Never;
         }
+        let status = self.auth_status_body(id, stack);
+        stack.remove(&id);
+        status
+    }
+
+    fn auth_status_body(&self, id: FnId, visited: &mut HashSet<FnId>) -> AuthStatus {
         let def = &self.fns[id];
         let facts = &self.facts[id];
         if facts.auth_attr || def.attrs.iter().any(is_auth_attr) || !facts.auth.is_empty() {
@@ -375,6 +426,135 @@ impl<'a> CrateModel<'a> {
             best = best.max(status);
         }
         best
+    }
+
+    /// Names of `id`'s parameters, in order (receiver excluded).
+    pub fn param_names(&self, id: FnId) -> Vec<String> {
+        self.fns[id].params().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// Which of `id`'s parameters are authorized with `require_auth`, following helpers.
+    pub fn subject_auth(&self, id: FnId) -> SubjectAuth {
+        self.subject_auth_inner(id, &mut HashSet::new())
+    }
+
+    fn subject_auth_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> SubjectAuth {
+        if stack.len() > MAX_DEPTH || !stack.insert(id) {
+            return SubjectAuth::default();
+        }
+        let out = self.subject_auth_body(id, stack);
+        stack.remove(&id);
+        out
+    }
+
+    fn subject_auth_body(&self, id: FnId, visited: &mut HashSet<FnId>) -> SubjectAuth {
+        let mut out = SubjectAuth::default();
+        let def = &self.fns[id];
+        let facts = &self.facts[id];
+        let params = self.param_names(id);
+        let idx = |n: &str| params.iter().position(|p| p == n);
+        if facts.auth_attr || def.attrs.iter().any(is_auth_attr) {
+            out.other = true;
+        }
+        for subj in &facts.auth_subjects {
+            match subj.as_deref().and_then(idx) {
+                Some(i) => {
+                    out.params.insert(i);
+                }
+                None => out.other = true,
+            }
+        }
+        // Configured auth functions and auth macros have no subject.
+        if facts.auth.len() + facts.cond_auth.len() > facts.auth_subjects.len() {
+            out.other = true;
+        }
+        for call in &facts.calls {
+            let callees = self.resolve(id, call);
+            if callees.is_empty() {
+                out.other |= call.auth_named;
+                continue;
+            }
+            for callee in callees {
+                let sub = self.subject_auth_inner(callee, visited);
+                out.other |= sub.other;
+                for j in sub.params {
+                    match call.args.get(j).and_then(|a| a.local.as_deref()).and_then(idx) {
+                        Some(i) => {
+                            out.params.insert(i);
+                        }
+                        None => out.other = true,
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Writes that decrease a value keyed by `id`'s parameters (`Balance(from)` set to
+    /// `balance - amount`), directly or through helpers such as `spend_balance(&e, &from, amount)`.
+    pub fn debits(&self, id: FnId) -> Vec<Debit> {
+        self.debits_inner(id, &mut HashSet::new()).0
+    }
+
+    /// Returns debits plus "value writes": writes keyed by parameters `K` whose value is
+    /// parameter `v`, which become debits when a caller passes a decreasing value as `v`.
+    #[allow(clippy::type_complexity)]
+    fn debits_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> (Vec<Debit>, Vec<(BTreeSet<usize>, usize)>) {
+        if stack.len() > MAX_DEPTH || !stack.insert(id) {
+            return (Vec::new(), Vec::new());
+        }
+        let out = self.debits_body(id, stack);
+        stack.remove(&id);
+        out
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn debits_body(&self, id: FnId, visited: &mut HashSet<FnId>) -> (Vec<Debit>, Vec<(BTreeSet<usize>, usize)>) {
+        let mut debits = Vec::new();
+        let mut value_writes = Vec::new();
+        let params = self.param_names(id);
+        let idx = |n: &str| params.iter().position(|p| p == n);
+        let facts = &self.facts[id];
+        for w in &facts.state_writes {
+            let key: BTreeSet<usize> = w.key_locals.iter().filter_map(|n| idx(n)).collect();
+            if key.is_empty() {
+                continue;
+            }
+            if w.value_decreasing {
+                debits.push(Debit { span: w.span, key_params: key });
+            } else {
+                for v in w.value_locals.iter().filter_map(|n| idx(n)) {
+                    value_writes.push((key.clone(), v));
+                }
+            }
+        }
+        for call in &facts.calls {
+            let map_key = |k: &BTreeSet<usize>| -> BTreeSet<usize> {
+                k.iter().filter_map(|&j| call.args.get(j)?.local.as_deref().and_then(idx)).collect()
+            };
+            for callee in self.resolve(id, call) {
+                let (sub_debits, sub_writes) = self.debits_inner(callee, visited);
+                for d in sub_debits {
+                    let key = map_key(&d.key_params);
+                    if !key.is_empty() {
+                        debits.push(Debit { span: call.span, key_params: key });
+                    }
+                }
+                for (k, v) in sub_writes {
+                    let key = map_key(&k);
+                    let Some(arg) = call.args.get(v) else { continue };
+                    if key.is_empty() {
+                        continue;
+                    }
+                    if arg.decreasing {
+                        debits.push(Debit { span: call.span, key_params: key });
+                    } else if let Some(vi) = arg.local.as_deref().and_then(idx) {
+                        value_writes.push((key, vi));
+                    }
+                }
+            }
+        }
+        (debits, value_writes)
     }
 
     /// `true` if `id` or anything it calls reads contract storage.
@@ -509,6 +689,61 @@ fn diverges(expr: &Expr) -> bool {
     }
 }
 
+/// The local passed as an argument, ignoring `&`, `*`, `.clone()`, `.into()` and the like.
+fn plain_local(e: &Expr) -> Option<String> {
+    match crate::syntax::strip(e) {
+        Expr::MethodCall(m)
+            if m.args.is_empty() && matches!(m.method.to_string().as_str(), "clone" | "into" | "to_owned") =>
+        {
+            plain_local(&m.receiver)
+        }
+        other => crate::syntax::as_local_ident(other),
+    }
+}
+
+/// Lowercase locals mentioned in an expression, following local bindings
+/// (`let key = DataKey::Balance(user.clone())`).
+fn locals_in(key: &Expr, b: &Bindings<'_>) -> Vec<String> {
+    let mut out: Vec<String> = resolved_idents(key, b)
+        .into_iter()
+        .filter(|i| i.starts_with(|c: char| c.is_lowercase()) && !matches!(i.as_str(), "clone" | "into" | "to_owned"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `true` if the value is computed by subtraction, directly or through a local
+/// (`let nb = b - amount; set(&k, &nb)`).
+fn is_decreasing(e: &Expr, b: &Bindings<'_>) -> bool {
+    struct D(bool);
+    impl<'ast> Visit<'ast> for D {
+        fn visit_expr_binary(&mut self, x: &'ast syn::ExprBinary) {
+            if matches!(x.op, syn::BinOp::Sub(_) | syn::BinOp::SubAssign(_)) {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_binary(self, x);
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if matches!(m.method.to_string().as_str(), "checked_sub" | "saturating_sub" | "wrapping_sub") {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut d = D(false);
+    d.visit_expr(e);
+    if !d.0 {
+        if let Some(init) = b.resolve(e) {
+            if !std::ptr::eq(crate::syntax::strip(init), crate::syntax::strip(e)) {
+                d.visit_expr(init);
+            }
+        }
+    }
+    d.0
+}
+
 /// The path segment before the function name in a call: `a::f` → `a`,
 /// `<T as Trait>::f` → `Trait`.
 fn call_qualifier(c: &syn::ExprCall) -> Option<String> {
@@ -579,13 +814,16 @@ impl FactsVisitor<'_, '_> {
         args: impl IntoIterator<Item = &'e Expr>,
     ) {
         let auth_named = is_auth_helper_name(&name, &[]);
-        let arg_idents = args.into_iter().filter_map(crate::syntax::as_local_ident).collect();
+        let args = args
+            .into_iter()
+            .map(|a| CallArg { local: plain_local(a), decreasing: is_decreasing(a, self.bindings) })
+            .collect();
         self.facts.calls.push(CallSite {
             name,
             span,
             is_method,
             qualifier,
-            arg_idents,
+            args,
             in_condition: self.cond_depth > 0,
             in_branch: self.branch_depth > 0,
             auth_named,
@@ -626,7 +864,21 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
         let name = m.method.to_string();
         let span = Span::of(&m.method);
         match name.as_str() {
-            "require_auth" | "require_auth_for_args" => self.push_auth(span),
+            "require_auth" | "require_auth_for_args" => {
+                self.push_auth(span);
+                self.facts.auth_subjects.push(plain_local(&m.receiver));
+                if name == "require_auth_for_args" {
+                    let mut locals: Vec<String> = m
+                        .args
+                        .iter()
+                        .flat_map(|a| resolved_idents(a, self.bindings))
+                        .filter(|i| i.starts_with(|c: char| c.is_lowercase()))
+                        .collect();
+                    locals.sort();
+                    locals.dedup();
+                    self.facts.auth_for_args.push((span, locals));
+                }
+            }
             "update_current_contract_wasm" => self.facts.upgrades.push(span),
             "transfer" | "transfer_from" => {
                 let from_contract = m
@@ -661,6 +913,8 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                     }
                     None => (vec![], false),
                 };
+                let key_locals = op.key().map(|k| locals_in(k, self.bindings)).unwrap_or_default();
+                let value = (op.kind == StorageOpKind::Set).then(|| m.args.iter().nth(1)).flatten();
                 self.facts.state_writes.push(StateWrite {
                     span,
                     kind: op.kind,
@@ -668,6 +922,9 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                     key_idents,
                     key_is_parameterised,
                     key_text,
+                    key_locals,
+                    value_locals: value.map(|v| locals_in(v, self.bindings)).unwrap_or_default(),
+                    value_decreasing: value.is_some_and(|v| is_decreasing(v, self.bindings)),
                 });
             } else if op.kind.is_read() {
                 self.facts.storage_reads.push(span);
