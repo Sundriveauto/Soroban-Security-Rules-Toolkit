@@ -19,7 +19,7 @@ warning[SG-001]: Exported function `withdraw` transfers tokens out of the contra
    = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). …
    = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
 
-stellar-guard scanned 12 files with 5 rules: 0 errors, 1 warning, 0 infos
+stellar-guard scanned 12 files with 9 rules: 0 errors, 1 warning, 0 infos
 note: stellar-guard reports potential issues found by source-level heuristics. Findings are not proof of a vulnerability, and a clean scan does not prove a contract is secure.
 ```
 
@@ -42,9 +42,10 @@ note: stellar-guard reports potential issues found by source-level heuristics. F
 | [SG-008](docs/rules/SG-008.md) | `ignored-try-call` | warning | Discarded results of `client.try_*` cross-contract calls |
 | [SG-009](docs/rules/SG-009.md) | `weak-check-auth` | error | Custom-account `__check_auth` that verifies no signature, or one not bound to the payload |
 
-Every rule follows helper functions across the crate, reports a **confidence** level, and is tested
-against both vulnerable and safe code. Each rule page lists its known false positives and false
-negatives.
+Every rule follows helper functions across the crate (and into local dependency crates), reports a
+**confidence** level, and is tested against both vulnerable and safe code. Each rule page lists its
+known false positives and false negatives. Recall is measured by seeding bugs into real contracts
+([docs/validation.md](docs/validation.md#recall-on-seeded-bugs)).
 
 ## Install
 
@@ -141,7 +142,7 @@ stellar-guard/
 │   ├── guard-cli/          # `stellar-guard` binary, integration tests, benchmarks
 │   ├── guard-parser/       # discovery, parsing, Cargo metadata, semantic model
 │   ├── guard-engine/       # Rule trait, config, suppressions, findings, fingerprints
-│   ├── guard-rules/        # SG-001 … SG-005
+│   ├── guard-rules/        # SG-001 … SG-009
 │   └── guard-reporters/    # text, JSON, SARIF, GitHub, Markdown
 ├── fixtures/
 │   ├── safe-contracts/     # must produce zero findings

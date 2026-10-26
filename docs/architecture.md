@@ -4,7 +4,7 @@ stellar-guard is a Cargo workspace of five crates with a strict one-way dependen
 
 ```mermaid
 flowchart LR
-    CLI["guard-cli<br/>stellar-guard binary"] --> RULES["guard-rules<br/>SG-001 … SG-005"]
+    CLI["guard-cli<br/>stellar-guard binary"] --> RULES["guard-rules<br/>SG-001 … SG-009"]
     CLI --> REP["guard-reporters<br/>text, json, sarif, github, markdown"]
     CLI --> ENG
     RULES --> ENG["guard-engine<br/>Rule trait, config, suppressions, findings"]
