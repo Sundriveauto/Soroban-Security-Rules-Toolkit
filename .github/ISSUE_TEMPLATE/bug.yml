@@ -1,0 +1,19 @@
+name: Bug report
+description: The CLI, a report format or the GitHub Action misbehaves.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Command line, config file and (if possible) input files.
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: stellar-guard version and OS

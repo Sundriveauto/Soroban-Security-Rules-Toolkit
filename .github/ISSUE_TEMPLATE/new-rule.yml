@@ -1,0 +1,31 @@
+name: New rule proposal
+description: Propose a new detection rule.
+labels: ["new-rule"]
+body:
+  - type: textarea
+    id: pattern
+    attributes:
+      label: Pattern
+      description: What source pattern should be detected?
+    validations: { required: true }
+  - type: textarea
+    id: impact
+    attributes:
+      label: Why it is dangerous on Soroban
+    validations: { required: true }
+  - type: textarea
+    id: vulnerable
+    attributes:
+      label: Vulnerable example
+      render: rust
+    validations: { required: true }
+  - type: textarea
+    id: safe
+    attributes:
+      label: Safe look-alike that must NOT be reported
+      render: rust
+    validations: { required: true }
+  - type: textarea
+    id: fp
+    attributes:
+      label: Expected false positives / negatives

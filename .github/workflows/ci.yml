@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --locked
+
+  self-check:
+    name: scan fixtures with the release binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Safe contracts pass
+        run: ./target/release/stellar-guard scan fixtures/safe-contracts
+      - name: Vulnerable examples fail with exit code 1
+        run: |
+          set +e
+          ./target/release/stellar-guard scan fixtures/vulnerable-examples --format sarif --output vulnerable.sarif
+          code=$?
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+          test "$(jq '.runs[0].results | length' vulnerable.sarif)" -gt 0
+      - name: Reports are reproducible
+        run: |
+          ./target/release/stellar-guard scan fixtures --format json --fail-on never -q > a.json
+          ./target/release/stellar-guard scan fixtures --format json --fail-on never -q > b.json
+          diff a.json b.json
+
+  action:
+    name: GitHub Action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Safe contracts
+        uses: ./integrations/github-action
+        with:
+          path: fixtures/safe-contracts
+          upload-sarif: "false"
+      - name: Vulnerable examples (expected to fail)
+        id: vulnerable
+        continue-on-error: true
+        uses: ./integrations/github-action
+        with:
+          path: fixtures/vulnerable-examples
+          upload-sarif: "false"
+          annotations: "false"
+          sarif-file: vulnerable.sarif
+      - name: Check action outputs
+        env:
+          CODE: ${{ steps.vulnerable.outputs.exit-code }}
+          OUTCOME: ${{ steps.vulnerable.outcome }}
+        run: |
+          test "$CODE" = "1"
+          test "$OUTCOME" = "failure"
+          test -s vulnerable.sarif
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

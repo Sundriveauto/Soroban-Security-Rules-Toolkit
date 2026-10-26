@@ -1,0 +1,33 @@
+name: False positive / false negative
+description: A rule reported safe code, or missed a vulnerable pattern.
+labels: ["rule-precision"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options: [False positive (safe code was reported), False negative (vulnerable code was missed)]
+    validations: { required: true }
+  - type: input
+    id: rule
+    attributes:
+      label: Rule ID
+      placeholder: SG-001
+    validations: { required: true }
+  - type: textarea
+    id: code
+    attributes:
+      label: Minimal code snippet
+      description: The smallest contract code that reproduces the problem.
+      render: rust
+    validations: { required: true }
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is this safe / vulnerable?
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: stellar-guard version
+      placeholder: output of `stellar-guard --version`
