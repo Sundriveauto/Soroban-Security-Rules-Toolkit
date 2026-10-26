@@ -10,6 +10,7 @@
 //! | SG-006 | `negative-amount`         | `i128` amounts written to storage without a sign check |
 //! | SG-007 | `missing-ttl-extension`   | Persistent / instance data whose TTL is never extended |
 //! | SG-008 | `ignored-try-call`        | Discarded results of `client.try_*` cross-contract calls |
+//! | SG-009 | `weak-check-auth`         | `__check_auth` that ignores the payload or verifies no signature |
 //!
 //! Every rule is a heuristic over source code. See `docs/rules/` for the
 //! detection logic, known false positives and false negatives of each rule.
@@ -24,6 +25,7 @@ mod sg005_unprotected_init;
 mod sg006_negative_amount;
 mod sg007_missing_ttl_extension;
 mod sg008_ignored_try_call;
+mod sg009_weak_check_auth;
 mod util;
 
 #[cfg(test)]
@@ -37,6 +39,7 @@ pub use sg005_unprotected_init::UnprotectedInitializer;
 pub use sg006_negative_amount::NegativeAmount;
 pub use sg007_missing_ttl_extension::MissingTtlExtension;
 pub use sg008_ignored_try_call::IgnoredTryCall;
+pub use sg009_weak_check_auth::WeakCheckAuth;
 
 /// All built-in rules, ordered by ID.
 pub fn all() -> Vec<Box<dyn Rule>> {
@@ -49,6 +52,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(NegativeAmount),
         Box::new(MissingTtlExtension),
         Box::new(IgnoredTryCall),
+        Box::new(WeakCheckAuth),
     ]
 }
 

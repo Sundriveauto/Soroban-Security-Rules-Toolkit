@@ -10,6 +10,7 @@
 | [SG-006](SG-006.md) | `negative-amount` | warning | `i128` amounts written to storage without rejecting negative values |
 | [SG-007](SG-007.md) | `missing-ttl-extension` | info | Persistent / instance data written by regular functions whose TTL is never extended |
 | [SG-008](SG-008.md) | `ignored-try-call` | warning | Discarded results of `client.try_*` cross-contract calls |
+| [SG-009](SG-009.md) | `weak-check-auth` | error | Custom-account `__check_auth` that verifies no signature, or one not bound to the payload |
 
 Every rule is a **source-level heuristic**. Each page lists what the rule detects, why it matters,
 an example and fix, known false positives / false negatives, and its options.
