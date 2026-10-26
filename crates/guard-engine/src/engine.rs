@@ -1,0 +1,311 @@
+//! Running rules over a project.
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+
+use guard_parser::{CrateInfo, CrateModel, DiscoverOptions, LoadError, ModelOptions, Project};
+
+use crate::config::Settings;
+use crate::finding::{Finding, Location, RuleInfo, ScanReport, Severity, Summary, ToolInfo};
+use crate::fingerprint::fingerprint;
+use crate::rule::{Diagnostic, Rule, RuleContext, RuleOptions};
+use crate::suppress::Suppressions;
+
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error(transparent)]
+    Load(#[from] LoadError),
+    #[error("no Rust source files found in {0}")]
+    NoSources(String),
+    #[error("unknown rule `{0}` (run `stellar-guard rules` to list rules)")]
+    UnknownRule(String),
+    #[error("{0}")]
+    InvalidOptions(String),
+}
+
+/// Holds the set of available rules and runs scans.
+pub struct Engine {
+    rules: Vec<Box<dyn Rule>>,
+    tool: ToolInfo,
+}
+
+impl Engine {
+    pub fn new(rules: Vec<Box<dyn Rule>>) -> Self {
+        Engine { rules, tool: ToolInfo { name: "stellar-guard".into(), version: env!("CARGO_PKG_VERSION").into() } }
+    }
+
+    /// Overrides the tool name/version recorded in reports (the CLI passes its own).
+    pub fn with_tool(mut self, name: &str, version: &str) -> Self {
+        self.tool = ToolInfo { name: name.into(), version: version.into() };
+        self
+    }
+
+    pub fn rules(&self) -> &[Box<dyn Rule>] {
+        &self.rules
+    }
+
+    pub fn find_rule(&self, id: &str) -> Option<&dyn Rule> {
+        self.rules.iter().find(|r| r.meta().id.eq_ignore_ascii_case(id)).map(|r| r.as_ref())
+    }
+
+    /// Checks that every rule referenced by `settings` exists and that rule
+    /// options are valid.
+    pub fn validate(&self, settings: &Settings) -> Result<(), EngineError> {
+        let referenced = settings.rules.keys().chain(settings.only.iter().flatten());
+        for id in referenced {
+            if self.find_rule(id).is_none() {
+                return Err(EngineError::UnknownRule(id.clone()));
+            }
+        }
+        for rule in &self.rules {
+            let opts = RuleOptions::new(settings.options(rule.meta().id));
+            rule.validate_options(&opts).map_err(EngineError::InvalidOptions)?;
+        }
+        Ok(())
+    }
+
+    /// Discovers, parses and analyzes all Rust files under `paths`.
+    pub fn scan(&self, paths: &[PathBuf], settings: &Settings) -> Result<ScanReport, EngineError> {
+        self.validate(settings)?;
+        let discover = DiscoverOptions { exclude: settings.exclude.clone(), include_tests: settings.include_tests };
+        let project = Project::load(paths, &discover)?;
+        if project.files.is_empty() && project.failures.is_empty() {
+            let shown: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
+            return Err(EngineError::NoSources(shown.join(", ")));
+        }
+        Ok(self.scan_project(&project, settings))
+    }
+
+    /// Analyzes in-memory sources as a single crate. Useful for tests and editors.
+    pub fn scan_sources<'s>(
+        &self,
+        sources: impl IntoIterator<Item = (&'s str, &'s str)>,
+        crate_info: CrateInfo,
+        settings: &Settings,
+    ) -> Result<ScanReport, EngineError> {
+        self.validate(settings)?;
+        let project = Project::from_sources(sources, crate_info, settings.include_tests);
+        Ok(self.scan_project(&project, settings))
+    }
+
+    /// Analyzes an already-loaded project. Assumes `settings` were validated.
+    pub fn scan_project(&self, project: &Project, settings: &Settings) -> ScanReport {
+        let model_opts = ModelOptions { auth_functions: settings.auth_functions.clone() };
+        let models = CrateModel::build_all(project, &model_opts);
+        let default_crate = CrateInfo::default();
+
+        let active: Vec<(&dyn Rule, RuleOptions)> = self
+            .rules
+            .iter()
+            .filter(|r| settings.is_enabled(r.meta().id))
+            .map(|r| (r.as_ref(), RuleOptions::new(settings.options(r.meta().id))))
+            .collect();
+
+        let mut findings = Vec::new();
+        let mut suppressed = 0usize;
+        let mut seen = BTreeSet::new();
+
+        for (file_idx, file) in project.files.iter().enumerate() {
+            let suppressions = Suppressions::parse(&file.text);
+            let model = &models[file.crate_id.min(models.len() - 1)];
+            let crate_info = project.crates.get(file.crate_id).unwrap_or(&default_crate);
+            for (rule, options) in &active {
+                let cx = RuleContext { project, file_idx, file, model, crate_info, options };
+                let mut diags = Vec::new();
+                rule.check(&cx, &mut diags);
+                let meta = rule.meta();
+                for d in diags {
+                    if d.confidence < settings.min_confidence {
+                        continue;
+                    }
+                    if !seen.insert((meta.id, file_idx, d.span, d.message.clone())) {
+                        continue;
+                    }
+                    if suppressions.is_suppressed(meta.id, d.span.start.line) {
+                        suppressed += 1;
+                        continue;
+                    }
+                    findings.push(self.to_finding(*rule, settings, file, d));
+                }
+            }
+        }
+
+        findings.sort_by(|a, b| (&a.location, &a.rule_id, &a.message).cmp(&(&b.location, &b.rule_id, &b.message)));
+        assign_fingerprints(&mut findings);
+
+        let summary = Summary {
+            files_scanned: project.files.len(),
+            errors: findings.iter().filter(|f| f.severity == Severity::Error).count(),
+            warnings: findings.iter().filter(|f| f.severity == Severity::Warning).count(),
+            infos: findings.iter().filter(|f| f.severity == Severity::Info).count(),
+            suppressed,
+            parse_failures: project.failures.len(),
+        };
+        let rules: Vec<RuleInfo> = active
+            .iter()
+            .map(|(r, _)| {
+                let m = r.meta();
+                m.info(settings.severity_override(m.id).unwrap_or(m.default_severity))
+            })
+            .collect();
+
+        ScanReport { tool: self.tool.clone(), summary, findings, parse_failures: project.failures.clone(), rules }
+    }
+
+    fn to_finding(
+        &self,
+        rule: &dyn Rule,
+        settings: &Settings,
+        file: &guard_parser::SourceFile,
+        d: Diagnostic,
+    ) -> Finding {
+        let meta = rule.meta();
+        let severity = settings.severity_override(meta.id).or(d.severity).unwrap_or(meta.default_severity);
+        Finding {
+            rule_id: meta.id.to_string(),
+            rule_name: meta.name.to_string(),
+            severity,
+            confidence: d.confidence,
+            message: d.message,
+            help: d.help.unwrap_or_else(|| meta.remediation.to_string()),
+            location: Location {
+                file: file.display_path.clone(),
+                start_line: d.span.start.line,
+                start_column: d.span.start.column,
+                end_line: d.span.end.line,
+                end_column: d.span.end.column,
+            },
+            snippet: file.line(d.span.start.line).unwrap_or("").trim_end().to_string(),
+            function: d.function,
+            fingerprint: String::new(),
+            help_uri: meta.help_uri(),
+        }
+    }
+}
+
+fn assign_fingerprints(findings: &mut [Finding]) {
+    let mut occurrences: HashMap<(String, String, Option<String>, String), usize> = HashMap::new();
+    for f in findings.iter_mut() {
+        let key =
+            (f.rule_id.clone(), f.location.file.clone(), f.function.clone(), crate::fingerprint::normalize(&f.snippet));
+        let n = occurrences.entry(key).or_insert(0);
+        f.fingerprint = fingerprint(&f.rule_id, &f.location.file, f.function.as_deref(), &f.snippet, *n);
+        *n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::finding::Confidence;
+    use crate::rule::RuleMeta;
+
+    /// Flags every function named `bad`.
+    struct BadFn;
+    static META: RuleMeta = RuleMeta {
+        id: "SG-900",
+        name: "bad-fn",
+        summary: "Bad function",
+        description: "test",
+        remediation: "rename it",
+        default_severity: Severity::Warning,
+        tags: &[],
+        options: &[],
+    };
+    impl Rule for BadFn {
+        fn meta(&self) -> &'static RuleMeta {
+            &META
+        }
+        fn check(&self, cx: &RuleContext<'_>, out: &mut Vec<Diagnostic>) {
+            for (_, f) in cx.model.fns_in_file(cx.file_idx) {
+                if f.name == "bad" {
+                    out.push(Diagnostic::new(f.name_span, "bad fn", Confidence::Medium).in_function(&f.name));
+                }
+            }
+        }
+    }
+
+    fn engine() -> Engine {
+        Engine::new(vec![Box::new(BadFn)])
+    }
+
+    #[test]
+    fn produces_findings_with_locations() {
+        let r = engine()
+            .scan_sources([("a.rs", "fn ok() {}\nfn bad() {}\n")], CrateInfo::default(), &Settings::default())
+            .unwrap();
+        assert_eq!(r.findings.len(), 1);
+        let f = &r.findings[0];
+        assert_eq!((f.location.start_line, f.location.start_column), (2, 4));
+        assert_eq!(f.snippet, "fn bad() {}");
+        assert_eq!(f.severity, Severity::Warning);
+        assert_eq!(r.summary.warnings, 1);
+    }
+
+    #[test]
+    fn severity_override_and_disable() {
+        let mut s = Settings::default();
+        s.rule_mut("SG-900").severity = Some(Severity::Error);
+        let r = engine().scan_sources([("a.rs", "fn bad() {}")], CrateInfo::default(), &s).unwrap();
+        assert_eq!(r.findings[0].severity, Severity::Error);
+        s.rule_mut("SG-900").enabled = Some(false);
+        let r = engine().scan_sources([("a.rs", "fn bad() {}")], CrateInfo::default(), &s).unwrap();
+        assert!(r.findings.is_empty());
+    }
+
+    #[test]
+    fn min_confidence_filters() {
+        let s = Settings { min_confidence: Confidence::High, ..Default::default() };
+        let r = engine().scan_sources([("a.rs", "fn bad() {}")], CrateInfo::default(), &s).unwrap();
+        assert!(r.findings.is_empty());
+    }
+
+    #[test]
+    fn suppression_counts() {
+        let r = engine()
+            .scan_sources(
+                [("a.rs", "// stellar-guard-ignore SG-900\nfn bad() {}\n")],
+                CrateInfo::default(),
+                &Settings::default(),
+            )
+            .unwrap();
+        assert!(r.findings.is_empty());
+        assert_eq!(r.summary.suppressed, 1);
+    }
+
+    #[test]
+    fn unknown_rule_rejected() {
+        let s = Settings { only: Some(vec!["SG-123".into()]), ..Default::default() };
+        assert!(matches!(
+            engine().scan_sources([("a.rs", "")], CrateInfo::default(), &s),
+            Err(EngineError::UnknownRule(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_options_rejected() {
+        let mut s = Settings::default();
+        s.rule_mut("SG-900").options.insert("nope".into(), toml::Value::Boolean(true));
+        assert!(matches!(
+            engine().scan_sources([("a.rs", "")], CrateInfo::default(), &s),
+            Err(EngineError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn deterministic_fingerprints() {
+        let src = "mod a { fn bad() {} }\nmod b { fn bad() {} }\n";
+        let r1 = engine().scan_sources([("a.rs", src)], CrateInfo::default(), &Settings::default()).unwrap();
+        let r2 = engine().scan_sources([("a.rs", src)], CrateInfo::default(), &Settings::default()).unwrap();
+        assert_eq!(r1, r2);
+        assert_eq!(r1.findings.len(), 2);
+        assert_ne!(r1.findings[0].fingerprint, r1.findings[1].fingerprint);
+    }
+
+    #[test]
+    fn no_sources_is_error() {
+        let d = tempfile::tempdir().unwrap();
+        let err = engine().scan(&[d.path().to_path_buf()], &Settings::default()).unwrap_err();
+        assert!(matches!(err, EngineError::NoSources(_)));
+    }
+}

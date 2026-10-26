@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/guard-parser",
+    "crates/guard-engine",
 ]
 # Fixture contracts are scan inputs, not workspace members.
 exclude = ["fixtures"]
