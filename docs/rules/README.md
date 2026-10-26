@@ -8,6 +8,7 @@
 | [SG-004](SG-004.md) | `unbounded-iteration` | warning | Loops over storage-backed or caller-supplied collections without a bound |
 | [SG-005](SG-005.md) | `unprotected-initializer` | error | `initialize`-style functions that can be called more than once |
 | [SG-006](SG-006.md) | `negative-amount` | warning | `i128` amounts written to storage without rejecting negative values |
+| [SG-007](SG-007.md) | `missing-ttl-extension` | info | Persistent / instance data written by regular functions whose TTL is never extended |
 
 Every rule is a **source-level heuristic**. Each page lists what the rule detects, why it matters,
 an example and fix, known false positives / false negatives, and its options.

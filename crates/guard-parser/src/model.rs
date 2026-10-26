@@ -200,6 +200,9 @@ pub struct FnFacts {
     pub outflows: Vec<Span>,
     /// `update_current_contract_wasm` calls.
     pub upgrades: Vec<Span>,
+    /// TTL extensions by tier: `storage().<tier>().extend_ttl(..)`; the deployer's
+    /// `extend_ttl_for_contract_instance` / `extend_ttl` count as instance.
+    pub ttl_extends: Vec<Option<StorageTier>>,
     /// Checks for existing state (`has`, or a `get` used in a condition).
     pub init_guards: Vec<Span>,
     /// Key checked by each entry of `init_guards` (most specific name), when known.
@@ -1088,6 +1091,9 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                 }
             }
             "update_current_contract_wasm" => self.facts.upgrades.push(span),
+            "extend_ttl_for_contract_instance" | "extend_ttl_for_code" => {
+                self.facts.ttl_extends.push(Some(StorageTier::Instance))
+            }
             "transfer" | "transfer_from" => {
                 let from_contract = m
                     .args
@@ -1099,7 +1105,11 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             }
             _ => {}
         }
-        if let Some(op) = storage_op(m, self.bindings) {
+        let op = storage_op(m, self.bindings);
+        if let Some(op) = op.as_ref().filter(|op| op.kind == StorageOpKind::ExtendTtl) {
+            self.facts.ttl_extends.push(op.tier);
+        }
+        if let Some(op) = op {
             if op.kind.is_write() {
                 let key_text = op
                     .key()

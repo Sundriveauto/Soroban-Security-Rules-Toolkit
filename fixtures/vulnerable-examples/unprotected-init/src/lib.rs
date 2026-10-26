@@ -37,6 +37,6 @@ impl Pool {
     pub fn set_fee(env: Env, fee_bps: u32) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.storage().instance().set(&DataKey::FeeBps, &fee_bps); // expect: SG-007
     }
 }

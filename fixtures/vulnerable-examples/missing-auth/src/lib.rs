@@ -30,7 +30,7 @@ fn require_admin(env: &Env) {
 fn write_balance(env: &Env, user: &Address, amount: i128) {
     env.storage()
         .persistent()
-        .set(&DataKey::Balance(user.clone()), &amount);
+        .set(&DataKey::Balance(user.clone()), &amount); // expect: SG-007
 }
 
 #[contract]
@@ -64,7 +64,7 @@ impl Vault {
 
     /// Anyone can take over the contract.
     pub fn set_admin(env: Env, new_admin: Address) {
-        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001
+        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
     }
 
     /// Anyone can replace the contract code.

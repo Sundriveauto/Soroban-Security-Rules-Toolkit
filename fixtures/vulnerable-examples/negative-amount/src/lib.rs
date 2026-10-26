@@ -17,7 +17,7 @@ fn read_balance(env: &Env, user: &Address) -> i128 {
 }
 
 fn write_balance(env: &Env, user: &Address, amount: i128) {
-    env.storage().persistent().set(&DataKey::Balance(user.clone()), &amount);
+    env.storage().persistent().set(&DataKey::Balance(user.clone()), &amount); // expect: SG-007
 }
 
 fn check_positive(amount: i128) {

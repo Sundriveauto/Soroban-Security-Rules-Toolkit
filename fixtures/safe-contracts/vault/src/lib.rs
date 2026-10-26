@@ -27,6 +27,9 @@ pub enum DataKey {
 
 const MAX_BATCH: u32 = 25;
 const MAX_DEPOSITORS: u32 = 100;
+const DAY_IN_LEDGERS: u32 = 17280;
+const TTL_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS;
+const TTL_EXTEND_TO: u32 = 30 * DAY_IN_LEDGERS;
 
 fn require_admin(env: &Env) -> Address {
     let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -47,9 +50,11 @@ fn balance_of(env: &Env, user: &Address) -> i128 {
 }
 
 fn set_balance(env: &Env, user: &Address, amount: i128) {
+    let key = DataKey::Balance(user.clone());
+    env.storage().persistent().set(&key, &amount);
     env.storage()
         .persistent()
-        .set(&DataKey::Balance(user.clone()), &amount);
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 #[contract]
@@ -140,6 +145,7 @@ impl Vault {
         let now = env.ledger().sequence();
         // stellar-guard-ignore SG-001 -- anyone may record a heartbeat; no value at risk
         env.storage().instance().set(&DataKey::LastPoke, &now);
+        env.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
     pub fn balance(env: Env, user: Address) -> i128 {

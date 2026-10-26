@@ -27,11 +27,11 @@ impl Staking {
         user.require_auth();
         let balance = read_stake(&env, &user);
         let new_balance = balance + amount; // expect: SG-003
-        env.storage().persistent().set(&DataKey::Stake(user), &new_balance); // expect: SG-006
+        env.storage().persistent().set(&DataKey::Stake(user), &new_balance); // expect: SG-006, SG-007
 
         let mut total_staked: i128 = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
         total_staked += amount; // expect: SG-003
-        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
+        env.storage().instance().set(&DataKey::TotalStaked, &total_staked); // expect: SG-007
     }
 
     pub fn unstake(env: Env, user: Address, amount: i128) {

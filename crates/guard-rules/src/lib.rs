@@ -7,7 +7,8 @@
 //! | SG-003 | `unchecked-arithmetic`    | Plain `+ - *` and lossy `as` casts on token amounts |
 //! | SG-004 | `unbounded-iteration`     | Loops over storage-backed or caller-supplied collections without a bound |
 //! | SG-005 | `unprotected-initializer` | `initialize` functions that can be called more than once |
-//! | SG-006 | `negative-amount`         | `i128` amounts used for transfers or balances without a sign check |
+//! | SG-006 | `negative-amount`         | `i128` amounts written to storage without a sign check |
+//! | SG-007 | `missing-ttl-extension`   | Persistent / instance data whose TTL is never extended |
 //!
 //! Every rule is a heuristic over source code. See `docs/rules/` for the
 //! detection logic, known false positives and false negatives of each rule.
@@ -20,6 +21,7 @@ mod sg003_unchecked_arithmetic;
 mod sg004_unbounded_iteration;
 mod sg005_unprotected_init;
 mod sg006_negative_amount;
+mod sg007_missing_ttl_extension;
 mod util;
 
 #[cfg(test)]
@@ -31,6 +33,7 @@ pub use sg003_unchecked_arithmetic::UncheckedArithmetic;
 pub use sg004_unbounded_iteration::UnboundedIteration;
 pub use sg005_unprotected_init::UnprotectedInitializer;
 pub use sg006_negative_amount::NegativeAmount;
+pub use sg007_missing_ttl_extension::MissingTtlExtension;
 
 /// All built-in rules, ordered by ID.
 pub fn all() -> Vec<Box<dyn Rule>> {
@@ -41,6 +44,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(UnboundedIteration),
         Box::new(UnprotectedInitializer),
         Box::new(NegativeAmount),
+        Box::new(MissingTtlExtension),
     ]
 }
 
