@@ -66,7 +66,7 @@ fn json_output_is_valid_and_deterministic() {
     assert_eq!(v["schema_version"], "1.0");
     assert_eq!(v["tool"]["name"], "stellar-guard");
     let findings = v["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), 18);
+    assert_eq!(findings.len(), 46);
     for f in findings {
         assert!(f["location"]["start_line"].as_u64().unwrap() > 0);
         assert_eq!(f["fingerprint"].as_str().unwrap().len(), 16);
@@ -86,11 +86,11 @@ fn sarif_output_file() {
     ])
     .code(1)
     .stdout(predicate::str::is_empty())
-    .stderr(predicate::str::contains("5 warnings"));
+    .stderr(predicate::str::contains("8 warnings"));
     let v: Value = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
     assert_eq!(v["version"], "2.1.0");
-    assert_eq!(v["runs"][0]["results"].as_array().unwrap().len(), 5);
-    assert_eq!(v["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap().len(), 5);
+    assert_eq!(v["runs"][0]["results"].as_array().unwrap().len(), 11);
+    assert_eq!(v["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap().len(), guard_rules::all().len());
 }
 
 #[test]
@@ -122,9 +122,12 @@ fn rule_selection() {
     assert!(v["findings"].as_array().unwrap().iter().all(|f| f["rule_id"] == "SG-005"));
     assert_eq!(v["rules"].as_array().unwrap().len(), 1);
 
-    let out = scan(&[p, "--disable", "SG-001,SG-002,SG-003,SG-004", "-f", "json", "-q"]).get_output().stdout.clone();
+    let out = scan(&[p, "--disable", "SG-001,SG-002,SG-003,SG-004,SG-006,SG-007,SG-008,SG-009", "-f", "json", "-q"])
+        .get_output()
+        .stdout
+        .clone();
     let v: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(v["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(v["findings"].as_array().unwrap().len(), 2);
 
     scan(&[p, "--rule", "SG-999"]).code(2).stderr(predicate::str::contains("unknown rule `SG-999`"));
 }
@@ -212,7 +215,7 @@ fn rules_explain_init() {
     bin().args(["rules"]).assert().success().stdout(predicate::str::contains("SG-004"));
     let out = bin().args(["rules", "--format", "json"]).assert().success().get_output().stdout.clone();
     let v: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 5);
+    assert_eq!(v.as_array().unwrap().len(), guard_rules::all().len());
 
     bin().args(["explain", "sg-003"]).assert().success().stdout(predicate::str::contains("amount-identifiers"));
     bin().args(["explain", "SG-123"]).assert().code(2);

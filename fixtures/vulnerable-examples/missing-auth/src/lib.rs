@@ -1,7 +1,7 @@
 //! VULNERABLE: privileged and fund-moving functions with no authorization.
 //! Every line carrying an "expect" marker comment must be reported by stellar-guard.
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, token, vec, Address, BytesN, Env};
 
 #[contracttype]
 #[derive(Clone)]
@@ -22,10 +22,15 @@ fn read_balance(env: &Env, user: &Address) -> i128 {
         .unwrap_or(0)
 }
 
+/// Looks like an access check but never calls `require_auth`.
+fn require_admin(env: &Env) {
+    let _admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+}
+
 fn write_balance(env: &Env, user: &Address, amount: i128) {
     env.storage()
         .persistent()
-        .set(&DataKey::Balance(user.clone()), &amount);
+        .set(&DataKey::Balance(user.clone()), &amount); // expect: SG-007
 }
 
 #[contract]
@@ -59,7 +64,7 @@ impl Vault {
 
     /// Anyone can take over the contract.
     pub fn set_admin(env: Env, new_admin: Address) {
-        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001
+        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
     }
 
     /// Anyone can replace the contract code.
@@ -69,7 +74,41 @@ impl Vault {
 
     /// Anyone can overwrite anyone's balance (write happens in a helper).
     pub fn credit(env: Env, user: Address, amount: i128) {
-        write_balance(&env, &user, amount); // expect: SG-001
+        write_balance(&env, &user, amount); // expect: SG-001, SG-006
+    }
+
+    /// The helper's name suggests an admin check, but its body does not authorize.
+    pub fn set_token(env: Env, token: Address) {
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Token, &token); // expect: SG-001
+    }
+
+    /// Authorization only happens when `notify` is set; otherwise anyone can withdraw for `user`.
+    pub fn withdraw_to(env: Env, user: Address, amount: i128, notify: bool) {
+        if notify {
+            user.require_auth();
+        }
+        let client = token::Client::new(&env, &read_token(&env));
+        client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001
+    }
+
+    /// The caller authorizes, but the balance debited belongs to `from`.
+    pub fn move_balance(env: Env, caller: Address, from: Address, amount: i128) {
+        caller.require_auth();
+        let balance = read_balance(&env, &from);
+        if balance < amount {
+            panic!("insufficient balance");
+        }
+        write_balance(&env, &from, balance - amount); // expect: SG-001, SG-006
+        let credited = read_balance(&env, &caller).checked_add(amount).expect("overflow");
+        write_balance(&env, &caller, credited);
+    }
+
+    /// Signs an empty argument list, so the signature works for any recipient and amount.
+    pub fn withdraw_signed(env: Env, user: Address, to: Address, amount: i128) {
+        user.require_auth_for_args(vec![&env]); // expect: SG-001
+        let client = token::Client::new(&env, &read_token(&env));
+        client.transfer(&env.current_contract_address(), &to, &amount);
     }
 
     /// Read-only: not reported.

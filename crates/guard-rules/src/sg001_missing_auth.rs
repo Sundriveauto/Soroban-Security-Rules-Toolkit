@@ -2,7 +2,7 @@
 //! upgrade the contract without any authorization check.
 
 use guard_engine::{Confidence, Diagnostic, Rule, RuleContext, RuleMeta, RuleOption, Severity};
-use guard_parser::{FnFacts, Span, Witness};
+use guard_parser::{AuthStatus, FnFacts, Span, Witness};
 
 use crate::sg005_unprotected_init::is_initializer_name;
 use crate::util::{has_word, word_set};
@@ -84,7 +84,14 @@ impl Rule for MissingAuthorization {
             {
                 continue;
             }
-            if model.performs_auth(id) {
+            let auth = model.auth_status(id);
+            if auth != AuthStatus::Never {
+                if let Some(d) = wrong_subject(model, id, f) {
+                    out.push(d);
+                }
+                out.extend(narrow_auth_args(model, id, f));
+            }
+            if auth == AuthStatus::Always {
                 continue;
             }
 
@@ -109,19 +116,40 @@ impl Rule for MissingAuthorization {
                 });
             let Some((kind, witness)) = found else { continue };
 
-            let (what, confidence) = match kind {
+            let (what, mut confidence) = match kind {
                 Sensitive::Upgrade => ("upgrades the contract WASM", Confidence::High),
                 Sensitive::Outflow => ("transfers tokens out of the contract", Confidence::High),
                 Sensitive::PrivilegedWrite => ("modifies privileged configuration", Confidence::High),
                 Sensitive::Write if f.takes_address() => ("writes contract storage", Confidence::Medium),
                 Sensitive::Write => ("writes contract storage", Confidence::Low),
             };
+            let partial = auth == AuthStatus::Sometimes;
+            let mut witness = witness;
+            let mut what = what;
+            if partial {
+                // A plain write behind conditional auth is usually a deliberate "authorize only
+                // when needed" pattern, unless it decreases a value keyed by a parameter (a
+                // balance debit that runs on the paths without auth).
+                if matches!(kind, Sensitive::Write) {
+                    let Some(debit) = model.debits(id).into_iter().next() else { continue };
+                    witness = Witness { span: debit.span, via: vec![] };
+                    what = "decreases a stored balance";
+                }
+                confidence = Confidence::Medium;
+            }
             let via = if witness.via.is_empty() {
                 String::new()
             } else {
                 format!(" (via `{}`)", witness.via.join("` → `"))
             };
-            let message = format!("Exported function `{}` {what}{via} without an authorization check", f.name);
+            let message = if partial {
+                format!(
+                    "Exported function `{}` {what}{via}, but authorizes only on some code paths (inside a branch, loop or closure)",
+                    f.name
+                )
+            } else {
+                format!("Exported function `{}` {what}{via} without an authorization check", f.name)
+            };
             let mut d = Diagnostic::new(witness.span, message, confidence).in_function(&f.name);
             if confidence == Confidence::Low {
                 // A plain storage write with no address involved (e.g. a public counter) is
@@ -131,6 +159,94 @@ impl Rule for MissingAuthorization {
             out.push(d);
         }
     }
+}
+
+/// Reports a balance debit keyed by an address parameter that never authorizes,
+/// when every authorization in the function is on *other* caller-chosen addresses
+/// (`caller.require_auth(); spend_balance(&e, &victim, amount)`).
+///
+/// Not reported when some authorization targets a stored admin or an opaque
+/// helper (admin clawback), or when another debit is keyed by both the debited
+/// and an authorized address (allowance spending in `transfer_from`).
+fn wrong_subject(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_parser::FnDef<'_>) -> Option<Diagnostic> {
+    let auth = model.subject_auth(id);
+    if auth.other || auth.params.is_empty() {
+        return None;
+    }
+    let params = f.params();
+    let is_address = |i: usize| {
+        params.get(i).is_some_and(|(_, ty)| guard_parser::syntax::idents(*ty).iter().any(|t| t == "Address"))
+    };
+    let debits = model.debits(id);
+    for d in &debits {
+        let Some(&victim) = d.key_params.iter().find(|&&i| is_address(i) && !auth.params.contains(&i)) else {
+            continue;
+        };
+        if d.key_params.iter().any(|i| auth.params.contains(i)) {
+            continue;
+        }
+        let delegated = debits
+            .iter()
+            .any(|o| o.key_params.contains(&victim) && o.key_params.iter().any(|i| auth.params.contains(i)));
+        if delegated {
+            continue;
+        }
+        let names: Vec<String> = auth.params.iter().map(|&i| format!("`{}`", params[i].0)).collect();
+        let message = format!(
+            "Exported function `{}` decreases a value keyed by `{}`, but only {} authorizes",
+            f.name,
+            params[victim].0,
+            names.join(", ")
+        );
+        return Some(Diagnostic::new(d.span, message, Confidence::Medium).in_function(&f.name).with_help(format!(
+            "Call `{}.require_auth()` before debiting it, or check an allowance granted by `{}` to the caller.",
+            params[victim].0, params[victim].0
+        )));
+    }
+    None
+}
+
+/// Reports `require_auth_for_args(..)` calls whose argument list includes none of
+/// the parameters that control a sensitive operation: `i128`/`u128` amounts and
+/// `Address`es (other than the authorizing one). The signature can then be reused
+/// with any amount and recipient.
+fn narrow_auth_args(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_parser::FnDef<'_>) -> Vec<Diagnostic> {
+    let facts = &model.facts[id];
+    if facts.auth_for_args.is_empty() {
+        return vec![];
+    }
+    let sensitive = model.witness(id, &|_, x| x.outflows.first().or(x.state_writes.first().map(|w| &w.span)).copied());
+    if sensitive.is_none() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    for (span, subject, args) in &facts.auth_for_args {
+        let relevant: Vec<String> = f
+            .params()
+            .into_iter()
+            .filter(|(name, ty)| {
+                let t = guard_parser::syntax::compact(*ty);
+                matches!(t.trim_start_matches('&'), "i128" | "u128" | "Address") && Some(name) != subject.as_ref()
+            })
+            .map(|(n, _)| n)
+            .collect();
+        // Signing a deliberate subset (as in an atomic swap, where each party signs its own
+        // side) is a design choice; only an argument list that covers none of them is reported.
+        if relevant.is_empty() || relevant.iter().any(|n| args.contains(n)) {
+            continue;
+        }
+        let missing: Vec<String> = relevant.iter().map(|n| format!("`{n}`")).collect();
+        let message = format!(
+            "Exported function `{}` calls `require_auth_for_args` without {} in the signed arguments",
+            f.name,
+            missing.join(", ")
+        );
+        out.push(Diagnostic::new(*span, message, Confidence::Medium).in_function(&f.name).with_help(
+            "Include every amount and address that the call acts on in the `require_auth_for_args` \
+arguments, or use `require_auth()` so the full invocation is signed.",
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -144,6 +260,127 @@ mod tests {
     }
 
     // ---- true positives -------------------------------------------------
+
+    const LEDGER: &str = r#"
+fn bal(e: &Env, a: &Address) -> i128 { e.storage().persistent().get(&K::Bal(a.clone())).unwrap_or(0) }
+fn put(e: &Env, a: &Address, v: i128) { e.storage().persistent().set(&K::Bal(a.clone()), &v); }
+fn spend(e: &Env, a: Address, amount: i128) { let b = bal(e, &a); if b < amount { panic!() } put(e, &a, b - amount); }
+fn spend_allowance(e: &Env, from: Address, spender: Address, amount: i128) {
+    let cur: i128 = e.storage().temporary().get(&K::Allow(from.clone(), spender.clone())).unwrap_or(0);
+    let v = Allowance { amount: cur - amount };
+    e.storage().temporary().set(&K::Allow(from, spender), &v);
+}
+"#;
+
+    #[test]
+    fn resolves_constant_keys() {
+        let f = check(
+            r#"
+const KEY: Symbol = symbol_short!("ADMIN");
+mod keys { pub const SLOT: Symbol = symbol_short!("OWNER"); }
+#[contractimpl]
+impl C {
+    pub fn set_a(e: Env, a: Address) { e.storage().instance().set(&KEY, &a); }
+    pub fn set_b(e: Env, a: Address) { e.storage().instance().set(&keys::SLOT, &a); }
+}
+"#,
+        );
+        assert_eq!(f.len(), 2, "{f:#?}");
+        assert!(f.iter().all(|x| x.message.contains("privileged configuration")), "{f:#?}");
+    }
+
+    #[test]
+    fn flags_debit_behind_conditional_auth() {
+        let src = format!(
+            "{LEDGER}#[contractimpl] impl T {{
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {{
+        if amount > 0 {{ from.require_auth(); }}
+        spend(&e, from, amount);
+    }}
+    pub fn touch(e: Env, who: Address, f: bool) {{
+        if f {{ who.require_auth(); }}
+        put(&e, &who, 1);
+    }}
+}}"
+        );
+        let f = check(&src);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(
+            f[0].message.contains("`transfer` decreases a stored balance, but authorizes only on some"),
+            "{}",
+            f[0].message
+        );
+    }
+
+    #[test]
+    fn flags_narrow_require_auth_for_args() {
+        let f = check(
+            r#"
+#[contractimpl]
+impl V {
+    pub fn withdraw(e: Env, user: Address, to: Address, amount: i128) {
+        user.require_auth_for_args(vec![&e]);
+        token::Client::new(&e, &t).transfer(&e.current_contract_address(), &to, &amount);
+    }
+    pub fn withdraw_ok(e: Env, user: Address, to: Address, amount: i128) {
+        user.require_auth_for_args((to.clone(), amount).into_val(&e));
+        token::Client::new(&e, &t).transfer(&e.current_contract_address(), &to, &amount);
+    }
+    pub fn swap_side(e: Env, a: Address, b: Address, amount_a: i128, amount_b: i128) {
+        a.require_auth_for_args((amount_a,).into_val(&e));
+        token::Client::new(&e, &t).transfer(&e.current_contract_address(), &to, &amount);
+    }
+    pub fn note(e: Env, user: Address, amount: i128) {
+        user.require_auth_for_args(vec![&e]);
+    }
+}
+"#,
+        );
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(f[0].message.contains("without `to`, `amount`"), "{}", f[0].message);
+        assert_eq!(f[0].function.as_deref(), Some("withdraw"));
+    }
+
+    #[test]
+    fn flags_debit_of_unauthorized_address() {
+        let src = format!(
+            "{LEDGER}#[contractimpl] impl T {{
+    pub fn steal(e: Env, caller: Address, victim: Address, amount: i128) {{
+        caller.require_auth();
+        spend(&e, victim, amount);
+    }}
+}}"
+        );
+        let f = check(&src);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(f[0].message.contains("keyed by `victim`, but only `caller` authorizes"), "{}", f[0].message);
+        assert_eq!(f[0].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn debit_patterns_that_are_authorized() {
+        let src = format!(
+            "{LEDGER}#[contractimpl] impl T {{
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {{
+        from.require_auth();
+        spend(&e, from.clone(), amount);
+        put(&e, &to, bal(&e, &to).checked_add(amount).unwrap());
+    }}
+    pub fn transfer_from(e: Env, spender: Address, from: Address, to: Address, amount: i128) {{
+        spender.require_auth();
+        spend_allowance(&e, from.clone(), spender, amount);
+        spend(&e, from, amount);
+    }}
+    pub fn clawback(e: Env, from: Address, amount: i128) {{
+        let admin: Address = e.storage().instance().get(&K::Admin).unwrap();
+        admin.require_auth();
+        spend(&e, from, amount);
+    }}
+}}"
+        );
+        let f = check(&src);
+        assert!(f.is_empty(), "{f:#?}");
+    }
 
     #[test]
     fn flags_withdraw_without_auth() {
@@ -176,10 +413,13 @@ impl C {
     pub fn upgrade(env: Env, hash: BytesN<32>) {
         env.deployer().update_current_contract_wasm(hash);
     }
+    pub fn upgrade2(env: Env, hash: BytesN<32>) {
+        env.deployer().update_current_contract(ContractExecutable::Wasm(hash));
+    }
 }
 "#,
         );
-        assert_eq!(lines(&f), vec![5, 8]);
+        assert_eq!(lines(&f), vec![5, 8, 11]);
         assert!(f.iter().all(|x| x.confidence == Confidence::High));
     }
 

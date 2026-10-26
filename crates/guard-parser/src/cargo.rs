@@ -18,6 +18,16 @@ pub struct CrateInfo {
     /// `overflow-checks` for the release profile: `Some(true)`/`Some(false)` when
     /// a manifest was found, `None` when unknown.
     pub overflow_checks: Option<bool>,
+    /// Names of local dependencies (`path = ".."` or `workspace = true`), with `-`
+    /// replaced by `_`. Helpers in these crates are followed when resolving calls.
+    pub local_deps: Vec<String>,
+}
+
+impl CrateInfo {
+    /// Package name as used in Rust paths (`my-lib` → `my_lib`).
+    pub fn rust_name(&self) -> Option<String> {
+        self.name.as_ref().map(|n| n.replace('-', "_"))
+    }
 }
 
 /// Caches manifest lookups so each directory is inspected at most once.
@@ -84,6 +94,27 @@ fn read_manifest(path: &Path) -> Option<toml::Table> {
     text.parse::<toml::Table>().ok()
 }
 
+/// Dependencies declared with `path = ".."` or `workspace = true` (normalized names).
+fn local_deps(table: &toml::Table) -> Vec<String> {
+    let mut out: Vec<String> = ["dependencies", "dev-dependencies"]
+        .iter()
+        .filter_map(|k| table.get(*k)?.as_table())
+        .flat_map(|deps| deps.iter())
+        .filter(|(_, spec)| {
+            spec.as_table()
+                .is_some_and(|t| t.contains_key("path") || t.get("workspace").and_then(|w| w.as_bool()) == Some(true))
+        })
+        .map(|(name, spec)| {
+            let real = spec.as_table().and_then(|t| t.get("package")).and_then(|p| p.as_str()).unwrap_or(name);
+            real.replace('-', "_")
+        })
+        .filter(|n| n != "soroban_sdk")
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn has_soroban_dep(table: &toml::Table) -> bool {
     let dep_tables = ["dependencies", "dev-dependencies", "build-dependencies"];
     let direct = dep_tables
@@ -103,6 +134,22 @@ fn has_soroban_dep(table: &toml::Table) -> bool {
 
 fn release_overflow_checks(table: &toml::Table) -> Option<bool> {
     table.get("profile")?.as_table()?.get("release")?.as_table()?.get("overflow-checks")?.as_bool()
+}
+
+/// `[profile.release.package.<name>] overflow-checks`. The `"*"` pattern only
+/// applies to non-workspace dependencies, so it is ignored for scanned crates.
+fn package_overflow_checks(table: &toml::Table, package: &str) -> Option<bool> {
+    table
+        .get("profile")?
+        .as_table()?
+        .get("release")?
+        .as_table()?
+        .get("package")?
+        .as_table()?
+        .get(package)?
+        .as_table()?
+        .get("overflow-checks")?
+        .as_bool()
 }
 
 /// Loads crate facts for the package rooted at `dir`.
@@ -128,10 +175,19 @@ pub fn load_crate_info(dir: &Path) -> CrateInfo {
     if let Some(v) = release_overflow_checks(&root_manifest) {
         overflow = Some(v);
     }
+    if let Some(v) = name.as_deref().and_then(|n| package_overflow_checks(&root_manifest, n)) {
+        overflow = Some(v);
+    }
     // Cargo's release default is `false` when unspecified.
     let overflow_checks = Some(overflow.unwrap_or(false));
 
-    CrateInfo { root: Some(dir.to_path_buf()), name, depends_on_soroban: has_soroban_dep(&manifest), overflow_checks }
+    CrateInfo {
+        root: Some(dir.to_path_buf()),
+        name,
+        depends_on_soroban: has_soroban_dep(&manifest),
+        overflow_checks,
+        local_deps: local_deps(&manifest),
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +212,27 @@ mod tests {
         assert_eq!(info.name.as_deref(), Some("c"));
         assert!(info.depends_on_soroban);
         assert_eq!(info.overflow_checks, Some(true));
+    }
+
+    #[test]
+    fn package_profile_override_wins() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers=[\"a\",\"b\"]\n[profile.release]\noverflow-checks = true\n\
+[profile.release.package.a]\noverflow-checks = false\n[profile.release.package.\"*\"]\noverflow-checks = false\n",
+        );
+        for c in ["a", "b"] {
+            write(d.path(), &format!("{c}/Cargo.toml"), &format!("[package]\nname=\"{c}\"\n"));
+            write(d.path(), &format!("{c}/src/lib.rs"), "");
+        }
+        let mut r = CrateResolver::new();
+        let a = r.crate_for(&d.path().join("a/src/lib.rs"));
+        let b = r.crate_for(&d.path().join("b/src/lib.rs"));
+        let crates = r.into_crates();
+        assert_eq!(crates[a].overflow_checks, Some(false));
+        assert_eq!(crates[b].overflow_checks, Some(true), "\"*\" does not apply to workspace members");
     }
 
     #[test]
