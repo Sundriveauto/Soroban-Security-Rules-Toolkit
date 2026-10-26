@@ -124,11 +124,16 @@ impl Rule for MissingAuthorization {
                 Sensitive::Write => ("writes contract storage", Confidence::Low),
             };
             let partial = auth == AuthStatus::Sometimes;
+            let mut witness = witness;
+            let mut what = what;
             if partial {
-                // A plain write behind conditional auth is usually a deliberate
-                // "authorize only when needed" pattern; don't report it.
+                // A plain write behind conditional auth is usually a deliberate "authorize only
+                // when needed" pattern, unless it decreases a value keyed by a parameter (a
+                // balance debit that runs on the paths without auth).
                 if matches!(kind, Sensitive::Write) {
-                    continue;
+                    let Some(debit) = model.debits(id).into_iter().next() else { continue };
+                    witness = Witness { span: debit.span, via: vec![] };
+                    what = "decreases a stored balance";
                 }
                 confidence = Confidence::Medium;
             }
@@ -285,6 +290,29 @@ impl C {
     }
 
     #[test]
+    fn flags_debit_behind_conditional_auth() {
+        let src = format!(
+            "{LEDGER}#[contractimpl] impl T {{
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {{
+        if amount > 0 {{ from.require_auth(); }}
+        spend(&e, from, amount);
+    }}
+    pub fn touch(e: Env, who: Address, f: bool) {{
+        if f {{ who.require_auth(); }}
+        put(&e, &who, 1);
+    }}
+}}"
+        );
+        let f = check(&src);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(
+            f[0].message.contains("`transfer` decreases a stored balance, but authorizes only on some"),
+            "{}",
+            f[0].message
+        );
+    }
+
+    #[test]
     fn flags_narrow_require_auth_for_args() {
         let f = check(
             r#"
@@ -385,10 +413,13 @@ impl C {
     pub fn upgrade(env: Env, hash: BytesN<32>) {
         env.deployer().update_current_contract_wasm(hash);
     }
+    pub fn upgrade2(env: Env, hash: BytesN<32>) {
+        env.deployer().update_current_contract(ContractExecutable::Wasm(hash));
+    }
 }
 "#,
         );
-        assert_eq!(lines(&f), vec![5, 8]);
+        assert_eq!(lines(&f), vec![5, 8, 11]);
         assert!(f.iter().all(|x| x.confidence == Confidence::High));
     }
 

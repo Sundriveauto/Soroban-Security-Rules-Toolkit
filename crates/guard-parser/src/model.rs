@@ -198,7 +198,7 @@ pub struct FnFacts {
     pub read_keys: Vec<String>,
     /// Token transfers whose source is the contract itself.
     pub outflows: Vec<Span>,
-    /// `update_current_contract_wasm` calls.
+    /// Contract upgrades: `update_current_contract_wasm` and `update_current_contract`.
     pub upgrades: Vec<Span>,
     /// TTL extensions by tier: `storage().<tier>().extend_ttl(..)`; the deployer's
     /// `extend_ttl_for_contract_instance` / `extend_ttl` count as instance.
@@ -1090,7 +1090,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                     self.facts.auth_for_args.push((span, plain_local(&m.receiver), locals));
                 }
             }
-            "update_current_contract_wasm" => self.facts.upgrades.push(span),
+            "update_current_contract_wasm" | "update_current_contract" => self.facts.upgrades.push(span),
             "extend_ttl_for_contract_instance" | "extend_ttl_for_code" => {
                 self.facts.ttl_extends.push(Some(StorageTier::Instance))
             }
