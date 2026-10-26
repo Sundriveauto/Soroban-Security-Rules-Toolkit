@@ -182,8 +182,9 @@ pub struct FnFacts {
     /// Receivers of `require_auth` / `require_auth_for_args` calls, when they are plain
     /// locals or parameters (`from` in `from.require_auth()`). `None` for other receivers.
     pub auth_subjects: Vec<Option<String>>,
-    /// Arguments of `require_auth_for_args` calls, as local names mentioned in them.
-    pub auth_for_args: Vec<(Span, Vec<String>)>,
+    /// `require_auth_for_args` calls: span, receiver (when a plain local) and the
+    /// lowercase local names mentioned in the argument list.
+    pub auth_for_args: Vec<(Span, Option<String>, Vec<String>)>,
     /// The function carries an access-control attribute such as `#[only_owner]`.
     pub auth_attr: bool,
     pub state_writes: Vec<StateWrite>,
@@ -876,7 +877,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                         .collect();
                     locals.sort();
                     locals.dedup();
-                    self.facts.auth_for_args.push((span, locals));
+                    self.facts.auth_for_args.push((span, plain_local(&m.receiver), locals));
                 }
             }
             "update_current_contract_wasm" => self.facts.upgrades.push(span),

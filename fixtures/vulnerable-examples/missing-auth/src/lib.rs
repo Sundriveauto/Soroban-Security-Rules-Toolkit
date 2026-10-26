@@ -1,7 +1,7 @@
 //! VULNERABLE: privileged and fund-moving functions with no authorization.
 //! Every line carrying an "expect" marker comment must be reported by stellar-guard.
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, token, vec, Address, BytesN, Env};
 
 #[contracttype]
 #[derive(Clone)]
@@ -102,6 +102,13 @@ impl Vault {
         write_balance(&env, &from, balance - amount); // expect: SG-001
         let credited = read_balance(&env, &caller).checked_add(amount).expect("overflow");
         write_balance(&env, &caller, credited);
+    }
+
+    /// Signs an empty argument list, so the signature works for any recipient and amount.
+    pub fn withdraw_signed(env: Env, user: Address, to: Address, amount: i128) {
+        user.require_auth_for_args(vec![&env]); // expect: SG-001
+        let client = token::Client::new(&env, &read_token(&env));
+        client.transfer(&env.current_contract_address(), &to, &amount);
     }
 
     /// Read-only: not reported.

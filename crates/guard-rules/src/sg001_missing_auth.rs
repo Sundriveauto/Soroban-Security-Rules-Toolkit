@@ -89,6 +89,7 @@ impl Rule for MissingAuthorization {
                 if let Some(d) = wrong_subject(model, id, f) {
                     out.push(d);
                 }
+                out.extend(narrow_auth_args(model, id, f));
             }
             if auth == AuthStatus::Always {
                 continue;
@@ -200,6 +201,49 @@ fn wrong_subject(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_pars
     None
 }
 
+/// Reports `require_auth_for_args(..)` calls whose argument list includes none of
+/// the parameters that control a sensitive operation: `i128`/`u128` amounts and
+/// `Address`es (other than the authorizing one). The signature can then be reused
+/// with any amount and recipient.
+fn narrow_auth_args(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_parser::FnDef<'_>) -> Vec<Diagnostic> {
+    let facts = &model.facts[id];
+    if facts.auth_for_args.is_empty() {
+        return vec![];
+    }
+    let sensitive = model.witness(id, &|_, x| x.outflows.first().or(x.state_writes.first().map(|w| &w.span)).copied());
+    if sensitive.is_none() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    for (span, subject, args) in &facts.auth_for_args {
+        let relevant: Vec<String> = f
+            .params()
+            .into_iter()
+            .filter(|(name, ty)| {
+                let t = guard_parser::syntax::compact(*ty);
+                matches!(t.trim_start_matches('&'), "i128" | "u128" | "Address") && Some(name) != subject.as_ref()
+            })
+            .map(|(n, _)| n)
+            .collect();
+        // Signing a deliberate subset (as in an atomic swap, where each party signs its own
+        // side) is a design choice; only an argument list that covers none of them is reported.
+        if relevant.is_empty() || relevant.iter().any(|n| args.contains(n)) {
+            continue;
+        }
+        let missing: Vec<String> = relevant.iter().map(|n| format!("`{n}`")).collect();
+        let message = format!(
+            "Exported function `{}` calls `require_auth_for_args` without {} in the signed arguments",
+            f.name,
+            missing.join(", ")
+        );
+        out.push(Diagnostic::new(*span, message, Confidence::Medium).in_function(&f.name).with_help(
+            "Include every amount and address that the call acts on in the `require_auth_for_args` \
+arguments, or use `require_auth()` so the full invocation is signed.",
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +266,35 @@ fn spend_allowance(e: &Env, from: Address, spender: Address, amount: i128) {
     e.storage().temporary().set(&K::Allow(from, spender), &v);
 }
 "#;
+
+    #[test]
+    fn flags_narrow_require_auth_for_args() {
+        let f = check(
+            r#"
+#[contractimpl]
+impl V {
+    pub fn withdraw(e: Env, user: Address, to: Address, amount: i128) {
+        user.require_auth_for_args(vec![&e]);
+        token::Client::new(&e, &t).transfer(&e.current_contract_address(), &to, &amount);
+    }
+    pub fn withdraw_ok(e: Env, user: Address, to: Address, amount: i128) {
+        user.require_auth_for_args((to.clone(), amount).into_val(&e));
+        token::Client::new(&e, &t).transfer(&e.current_contract_address(), &to, &amount);
+    }
+    pub fn swap_side(e: Env, a: Address, b: Address, amount_a: i128, amount_b: i128) {
+        a.require_auth_for_args((amount_a,).into_val(&e));
+        token::Client::new(&e, &t).transfer(&e.current_contract_address(), &to, &amount);
+    }
+    pub fn note(e: Env, user: Address, amount: i128) {
+        user.require_auth_for_args(vec![&e]);
+    }
+}
+"#,
+        );
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert!(f[0].message.contains("without `to`, `amount`"), "{}", f[0].message);
+        assert_eq!(f[0].function.as_deref(), Some("withdraw"));
+    }
 
     #[test]
     fn flags_debit_of_unauthorized_address() {

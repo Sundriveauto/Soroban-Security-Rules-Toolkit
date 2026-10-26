@@ -66,7 +66,7 @@ fn json_output_is_valid_and_deterministic() {
     assert_eq!(v["schema_version"], "1.0");
     assert_eq!(v["tool"]["name"], "stellar-guard");
     let findings = v["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), 22);
+    assert_eq!(findings.len(), 23);
     for f in findings {
         assert!(f["location"]["start_line"].as_u64().unwrap() > 0);
         assert_eq!(f["fingerprint"].as_str().unwrap().len(), 16);
