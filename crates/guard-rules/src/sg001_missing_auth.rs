@@ -268,6 +268,23 @@ fn spend_allowance(e: &Env, from: Address, spender: Address, amount: i128) {
 "#;
 
     #[test]
+    fn resolves_constant_keys() {
+        let f = check(
+            r#"
+const KEY: Symbol = symbol_short!("ADMIN");
+mod keys { pub const SLOT: Symbol = symbol_short!("OWNER"); }
+#[contractimpl]
+impl C {
+    pub fn set_a(e: Env, a: Address) { e.storage().instance().set(&KEY, &a); }
+    pub fn set_b(e: Env, a: Address) { e.storage().instance().set(&keys::SLOT, &a); }
+}
+"#,
+        );
+        assert_eq!(f.len(), 2, "{f:#?}");
+        assert!(f.iter().all(|x| x.message.contains("privileged configuration")), "{f:#?}");
+    }
+
+    #[test]
     fn flags_narrow_require_auth_for_args() {
         let f = check(
             r#"

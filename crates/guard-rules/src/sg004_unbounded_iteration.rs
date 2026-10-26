@@ -201,7 +201,13 @@ fn loaded_keys(expr: &Expr, bindings: &Bindings<'_>, model: &CrateModel<'_>) -> 
         fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
             if let Some(op) = storage_op(m, self.bindings) {
                 if op.kind == guard_parser::StorageOpKind::Get {
-                    if let Some(k) = op.key().and_then(|k| guard_parser::syntax::key_names(k, self.bindings).pop()) {
+                    if let Some(k) = op.key().and_then(|k| {
+                        guard_parser::model::resolve_const_key(
+                            guard_parser::syntax::key_names(k, self.bindings),
+                            &self.model.consts,
+                        )
+                        .pop()
+                    }) {
                         self.keys.push(k);
                     }
                 }

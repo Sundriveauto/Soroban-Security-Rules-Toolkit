@@ -248,6 +248,9 @@ pub struct CrateModel<'a> {
     pub fns: Vec<FnDef<'a>>,
     pub facts: Vec<FnFacts>,
     by_name: HashMap<String, Vec<FnId>>,
+    /// Key names of crate-level `const` / `static` items (`const KEY: Symbol =
+    /// symbol_short!("ADMIN")` → `KEY` ↦ `["ADMIN"]`), used to resolve storage keys.
+    pub consts: HashMap<String, Vec<String>>,
 }
 
 /// The place where a transitive property was found, seen from the queried function.
@@ -274,12 +277,16 @@ impl<'a> CrateModel<'a> {
             let module = file_module_path(&file.path);
             collect_items(&file.ast.items, file_idx, &module, &mut fns);
         }
-        let facts = fns.iter().map(|f| collect_facts(f, opts)).collect();
+        let mut consts = HashMap::new();
+        for file in project.files.iter().filter(|f| f.crate_id == crate_id) {
+            collect_consts(&file.ast.items, &mut consts);
+        }
+        let facts = fns.iter().map(|f| collect_facts(f, opts, &consts)).collect();
         let mut by_name: HashMap<String, Vec<FnId>> = HashMap::new();
         for (i, f) in fns.iter().enumerate() {
             by_name.entry(f.name.clone()).or_default().push(i);
         }
-        CrateModel { crate_id, fns, facts, by_name }
+        CrateModel { crate_id, fns, facts, by_name, consts }
     }
 
     /// Functions defined in a given file.
@@ -817,10 +824,51 @@ fn call_qualifier(c: &syn::ExprCall) -> Option<String> {
     (n >= 2).then(|| p.path.segments[n - 2].ident.to_string())
 }
 
-fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
+/// Key names of `const` / `static` items, including those in inline modules.
+fn collect_consts(items: &[syn::Item], out: &mut HashMap<String, Vec<String>>) {
+    let empty = Bindings::default();
+    for item in items {
+        let (name, expr) = match item {
+            syn::Item::Const(c) => (c.ident.to_string(), &*c.expr),
+            syn::Item::Static(s) => (s.ident.to_string(), &*s.expr),
+            syn::Item::Mod(m) => {
+                if let Some((_, items)) = &m.content {
+                    collect_consts(items, out);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let names = crate::syntax::key_names(expr, &empty);
+        if !names.is_empty() {
+            out.insert(name, names);
+        }
+    }
+}
+
+/// Key names with a constant (`&ADMIN_KEY`, `&keys::ADMIN_KEY`) replaced by its value's names,
+/// keeping the constant's own name first so both contribute words.
+pub fn resolve_const_key(names: Vec<String>, consts: &HashMap<String, Vec<String>>) -> Vec<String> {
+    // `KEY` or `keys::KEY` (module path segments are lowercase).
+    let Some((last, prefix)) = names.split_last() else { return names };
+    if !prefix.iter().all(|p| p.starts_with(|c: char| c.is_lowercase())) {
+        return names;
+    }
+    match consts.get(last) {
+        Some(value) => {
+            let mut out = vec![last.clone()];
+            out.extend(value.iter().filter(|v| *v != last).cloned());
+            out
+        }
+        None => names,
+    }
+}
+
+fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions, consts: &HashMap<String, Vec<String>>) -> FnFacts {
     let bindings = Bindings::collect(def.block);
     let mut v = FactsVisitor {
         bindings: &bindings,
+        consts,
         opts,
         facts: FnFacts { auth_attr: def.attrs.iter().any(is_auth_attr), ..Default::default() },
         cond_depth: 0,
@@ -832,6 +880,7 @@ fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
 
 struct FactsVisitor<'b, 'a> {
     bindings: &'b Bindings<'a>,
+    consts: &'b HashMap<String, Vec<String>>,
     opts: &'b ModelOptions,
     facts: FnFacts,
     cond_depth: usize,
@@ -916,25 +965,32 @@ impl FactsVisitor<'_, '_> {
 }
 
 impl FactsVisitor<'_, '_> {
+    /// Key names of a storage key expression, resolving crate constants.
+    fn key_names(&self, k: &Expr) -> Vec<String> {
+        resolve_const_key(crate::syntax::key_names(k, self.bindings), self.consts)
+    }
+
     /// Key name of the first storage read inside `expr`.
     fn read_key_in(&self, expr: &Expr) -> Option<String> {
         struct R<'x, 'a> {
             b: &'x Bindings<'a>,
-            key: Option<String>,
+            key: Option<Vec<String>>,
+            key_found: bool,
         }
         impl<'ast> Visit<'ast> for R<'_, '_> {
             fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
-                if self.key.is_none() {
+                if !self.key_found {
                     if let Some(op) = storage_op(m, self.b).filter(|op| op.kind.is_read()) {
-                        self.key = op.key().and_then(|k| crate::syntax::key_names(k, self.b).pop());
+                        self.key = op.key().map(|k| crate::syntax::key_names(k, self.b));
+                        self.key_found = true;
                     }
                 }
                 syn::visit::visit_expr_method_call(self, m);
             }
         }
-        let mut r = R { b: self.bindings, key: None };
+        let mut r = R { b: self.bindings, key: None, key_found: false };
         r.visit_expr(expr);
-        r.key
+        r.key.and_then(|names| resolve_const_key(names, self.consts).pop())
     }
 }
 
@@ -988,7 +1044,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                             ),
                             _ => false,
                         };
-                        (crate::syntax::key_names(k, self.bindings), parameterised)
+                        (self.key_names(k), parameterised)
                     }
                     None => (vec![], false),
                 };
@@ -1008,13 +1064,13 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             } else if op.kind.is_read() {
                 self.facts.storage_reads.push(span);
                 if op.kind == StorageOpKind::Get {
-                    if let Some(k) = op.key().and_then(|k| crate::syntax::key_names(k, self.bindings).pop()) {
+                    if let Some(k) = op.key().and_then(|k| self.key_names(k).pop()) {
                         self.facts.read_keys.push(k);
                     }
                 }
                 if op.kind == StorageOpKind::Has || self.cond_depth > 0 {
                     self.facts.init_guards.push(span);
-                    let key = op.key().and_then(|k| crate::syntax::key_names(k, self.bindings).pop());
+                    let key = op.key().and_then(|k| self.key_names(k).pop());
                     self.facts.init_guard_keys.push(key);
                 }
             }
