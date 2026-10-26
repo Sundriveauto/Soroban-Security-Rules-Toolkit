@@ -210,8 +210,59 @@ fn op_info(op: &BinOp) -> Option<(&'static str, &'static str)> {
     })
 }
 
+impl ArithVisitor<'_> {
+    /// `(a / b) * c` or `a.checked_div(b)…checked_mul(c)` on amounts: the division
+    /// truncates before the multiplication, losing precision.
+    fn check_div_before_mul(&mut self, span: Span, divided: &Expr, factor: &Expr) {
+        let div = match guard_parser::syntax::strip(divided) {
+            Expr::Binary(d) if matches!(d.op, BinOp::Div(_)) => Some((&*d.left, &*d.right)),
+            Expr::MethodCall(m) if m.method == "checked_div" || m.method == "unwrap" || m.method == "expect" => {
+                let inner = if m.method == "checked_div" {
+                    Some(m)
+                } else {
+                    match guard_parser::syntax::strip(&m.receiver) {
+                        Expr::MethodCall(i) if i.method == "checked_div" => Some(i),
+                        _ => None,
+                    }
+                };
+                inner.and_then(|i| i.args.first().map(|a| (&*i.receiver, a)))
+            }
+            _ => None,
+        };
+        let Some((num, den)) = div else { return };
+        let amount = [num, den, factor].into_iter().find_map(|e| self.amount_operand(e));
+        let Some((name, _)) = amount else { return };
+        self.out.push(
+            Diagnostic::new(
+                span,
+                format!("Division before multiplication on token amount `{name}` truncates the intermediate result"),
+                Confidence::Medium,
+            )
+            .in_function(self.function)
+            .with_severity(Severity::Info)
+            .with_help(
+                "Multiply first and divide last (`a * c / b`), using checked or widened arithmetic \
+to avoid overflow, so rounding happens once.",
+            ),
+        );
+    }
+}
+
 impl<'ast> Visit<'ast> for ArithVisitor<'_> {
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        if m.method == "checked_mul" || m.method == "saturating_mul" {
+            if let Some(arg) = m.args.first() {
+                self.check_div_before_mul(Span::of(&m.method), &m.receiver, arg);
+            }
+        }
+        syn::visit::visit_expr_method_call(self, m);
+    }
+
     fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+        if matches!(b.op, BinOp::Mul(_)) {
+            self.check_div_before_mul(Span::of(&b.op), &b.left, &b.right);
+            self.check_div_before_mul(Span::of(&b.op), &b.right, &b.left);
+        }
         let mut reported = false;
         if self.suppress == 0 {
             if let Some((sym, checked)) = op_info(&b.op) {
@@ -393,6 +444,24 @@ fn h(amount: i128) -> u128 { if amount > 0 { amount as u128 } else { 0 } }
         assert_eq!(lines(&f), vec![1]);
         assert_eq!(f[0].confidence, Confidence::Medium);
         assert!(f[0].message.contains("`a`"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn flags_division_before_multiplication() {
+        let f = run_with(
+            Box::new(UncheckedArithmetic),
+            r#"
+fn a(amount: i128, total: i128, pool: i128) -> i128 { (amount / total) * pool }
+fn b(amount: i128, total: i128, pool: i128) -> i128 { amount.checked_div(total).unwrap().checked_mul(pool).unwrap() }
+fn c(amount: i128, total: i128, pool: i128) -> i128 { amount.checked_mul(pool).unwrap().checked_div(total).unwrap() }
+fn d(i: u32, n: u32, k: u32) -> u32 { (i / n) * k }
+"#,
+            soroban_crate(Some(true)),
+            &Default::default(),
+        );
+        let div: Vec<_> = f.iter().filter(|x| x.message.contains("Division before multiplication")).collect();
+        assert_eq!(div.iter().map(|x| x.location.start_line).collect::<Vec<_>>(), vec![2, 3], "{f:#?}");
+        assert!(div.iter().all(|x| x.severity == Severity::Info));
     }
 
     #[test]

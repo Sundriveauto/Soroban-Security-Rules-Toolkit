@@ -66,7 +66,7 @@ fn json_output_is_valid_and_deterministic() {
     assert_eq!(v["schema_version"], "1.0");
     assert_eq!(v["tool"]["name"], "stellar-guard");
     let findings = v["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), 23);
+    assert_eq!(findings.len(), 24);
     for f in findings {
         assert!(f["location"]["start_line"].as_u64().unwrap() > 0);
         assert_eq!(f["fingerprint"].as_str().unwrap().len(), 16);
@@ -89,7 +89,7 @@ fn sarif_output_file() {
     .stderr(predicate::str::contains("6 warnings"));
     let v: Value = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
     assert_eq!(v["version"], "2.1.0");
-    assert_eq!(v["runs"][0]["results"].as_array().unwrap().len(), 6);
+    assert_eq!(v["runs"][0]["results"].as_array().unwrap().len(), 7);
     assert_eq!(v["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap().len(), 5);
 }
 

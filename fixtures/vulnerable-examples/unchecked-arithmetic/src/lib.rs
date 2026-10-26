@@ -54,6 +54,11 @@ impl Staking {
         x * y // expect: SG-003
     }
 
+    /// Divides before multiplying: small stakes round down to zero reward.
+    pub fn share(_env: Env, amount: i128, total: i128, pool: i128) -> i128 {
+        amount.checked_div(total).unwrap().checked_mul(pool).unwrap() // expect: SG-003
+    }
+
     /// Checked arithmetic: not reported.
     pub fn stake_checked(env: Env, user: Address, amount: i128) {
         user.require_auth();
