@@ -1,0 +1,170 @@
+name: stellar-guard
+description: Static security analysis for Soroban (Stellar) smart contracts, with SARIF upload to GitHub code scanning.
+author: stellar-guard contributors
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  path:
+    description: Files or directories to scan (whitespace separated).
+    default: "."
+  fail-on:
+    description: Minimum severity that fails the step (info, warning, error, never).
+    default: warning
+  min-confidence:
+    description: Hide findings below this confidence (low, medium, high). Empty uses the config file or `low`.
+    default: ""
+  config:
+    description: Path to a stellar-guard.toml. Empty auto-discovers one in the working directory.
+    default: ""
+  args:
+    description: Extra arguments passed to `stellar-guard scan`.
+    default: ""
+  version:
+    description: >
+      Release tag to download a prebuilt binary for (e.g. `v0.1.0`). Empty builds stellar-guard from the
+      action's own source with `cargo install` (cached between runs).
+    default: ""
+  sarif-file:
+    description: Where to write the SARIF report.
+    default: stellar-guard.sarif
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning (needs `security-events: write`).
+    default: "true"
+  annotations:
+    description: Emit inline annotations on the pull request diff.
+    default: "true"
+  job-summary:
+    description: Write a Markdown summary of findings to the job summary page.
+    default: "true"
+
+outputs:
+  exit-code:
+    description: "stellar-guard exit code: 0 = pass, 1 = findings at or above fail-on, 2 = error."
+    value: ${{ steps.scan.outputs.exit-code }}
+  sarif-file:
+    description: Path of the SARIF report.
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute cache key
+      id: key
+      if: inputs.version == ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_ACTION_PATH/../.."
+        if command -v sha256sum >/dev/null 2>&1; then sum="sha256sum"; else sum="shasum -a 256"; fi
+        hash=$(find crates Cargo.toml Cargo.lock -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) \
+          | LC_ALL=C sort | xargs $sum | $sum | cut -c1-24)
+        echo "key=stellar-guard-${RUNNER_OS}-${RUNNER_ARCH}-${hash}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached build
+      id: cache
+      if: inputs.version == ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/stellar-guard-install
+        key: ${{ steps.key.outputs.key }}
+
+    - name: Build stellar-guard from source
+      if: inputs.version == '' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v cargo >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+        fi
+        cargo install --locked --path "$GITHUB_ACTION_PATH/../../crates/guard-cli" --root "$RUNNER_TEMP/stellar-guard-install"
+
+    - name: Download prebuilt stellar-guard
+      if: inputs.version != ''
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        ACTION_REPO: ${{ github.action_repository }}
+      run: |
+        set -euo pipefail
+        repo="${ACTION_REPO:-petermuazu/Soroban-Security-Rules-Toolkit}"
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) target=x86_64-unknown-linux-musl ;;
+          Linux-ARM64) target=aarch64-unknown-linux-musl ;;
+          macOS-X64) target=x86_64-apple-darwin ;;
+          macOS-ARM64) target=aarch64-apple-darwin ;;
+          Windows-X64) target=x86_64-pc-windows-msvc ;;
+          *) echo "::error::No prebuilt stellar-guard for ${RUNNER_OS}-${RUNNER_ARCH}; leave 'version' empty to build from source"; exit 2 ;;
+        esac
+        dest="$RUNNER_TEMP/stellar-guard-install/bin"
+        mkdir -p "$dest"
+        base="https://github.com/${repo}/releases/download/${VERSION}/stellar-guard-${VERSION}-${target}"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          curl -fsSL "${base}.zip" -o "$RUNNER_TEMP/sg.zip"
+          unzip -o -j "$RUNNER_TEMP/sg.zip" '*stellar-guard.exe' -d "$dest"
+        else
+          curl -fsSL "${base}.tar.gz" | tar -xz -C "$dest" --strip-components=1 --wildcards '*/stellar-guard'
+          chmod +x "$dest/stellar-guard"
+        fi
+
+    - name: Add stellar-guard to PATH
+      shell: bash
+      run: |
+        echo "$RUNNER_TEMP/stellar-guard-install/bin" >> "$GITHUB_PATH"
+
+    - name: Run stellar-guard
+      id: scan
+      shell: bash
+      env:
+        SG_PATHS: ${{ inputs.path }}
+        SG_FAIL_ON: ${{ inputs.fail-on }}
+        SG_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        SG_CONFIG: ${{ inputs.config }}
+        SG_ARGS: ${{ inputs.args }}
+        SG_SARIF: ${{ inputs.sarif-file }}
+        SG_ANNOTATIONS: ${{ inputs.annotations }}
+        SG_SUMMARY: ${{ inputs.job-summary }}
+      run: |
+        set -uo pipefail
+        stellar-guard --version
+        args=(scan --fail-on "$SG_FAIL_ON" --report "sarif=$SG_SARIF")
+        if [ "$SG_ANNOTATIONS" = "true" ]; then args+=(--format github); else args+=(--format text); fi
+        if [ -n "$SG_MIN_CONFIDENCE" ]; then args+=(--min-confidence "$SG_MIN_CONFIDENCE"); fi
+        if [ -n "$SG_CONFIG" ]; then args+=(--config "$SG_CONFIG"); fi
+        summary_file="$RUNNER_TEMP/stellar-guard-summary.md"
+        if [ "$SG_SUMMARY" = "true" ]; then args+=(--report "markdown=$summary_file"); fi
+        # Intentional word splitting: paths and extra args are whitespace separated.
+        # shellcheck disable=SC2206
+        extra=($SG_ARGS)
+        # shellcheck disable=SC2206
+        paths=($SG_PATHS)
+        stellar-guard "${args[@]}" "${extra[@]}" -- "${paths[@]}"
+        code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ "$SG_SUMMARY" = "true" ] && [ -f "$summary_file" ]; then
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ "$code" -eq 2 ]; then
+          echo "::error::stellar-guard failed to run (exit code 2)"
+        fi
+        exit 0
+
+    - name: Upload SARIF to code scanning
+      if: inputs.upload-sarif == 'true' && hashFiles(inputs.sarif-file) != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: stellar-guard
+
+    - name: Fail on findings
+      shell: bash
+      env:
+        CODE: ${{ steps.scan.outputs.exit-code }}
+      run: |
+        if [ "$CODE" != "0" ]; then
+          echo "stellar-guard exited with code $CODE"
+          exit "$CODE"
+        fi
