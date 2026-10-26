@@ -8,6 +8,7 @@ pub enum DataKey {
     Admin,
     Token,
     FeeBps,
+    Initialized,
 }
 
 fn write_admin(env: &Env, admin: &Address) {
@@ -23,6 +24,14 @@ impl Pool {
         write_admin(&env, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+    }
+
+    /// Checks an `Initialized` flag that is never set, so the check always passes.
+    pub fn init_pool(env: Env, admin: Address) { // expect: SG-005
+        if env.storage().instance().has(&DataKey::Initialized) {
+            panic!("already initialized");
+        }
+        write_admin(&env, &admin);
     }
 
     pub fn set_fee(env: Env, fee_bps: u32) {

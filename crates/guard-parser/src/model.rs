@@ -197,6 +197,8 @@ pub struct FnFacts {
     pub upgrades: Vec<Span>,
     /// Checks for existing state (`has`, or a `get` used in a condition).
     pub init_guards: Vec<Span>,
+    /// Key checked by each entry of `init_guards` (most specific name), when known.
+    pub init_guard_keys: Vec<Option<String>>,
     pub calls: Vec<CallSite>,
     /// Local names whose `.len()` is compared in a condition (`if items.len() >= MAX`).
     pub len_bounds: Vec<String>,
@@ -565,6 +567,57 @@ impl<'a> CrateModel<'a> {
         self.witness(id, &|_, f| f.storage_reads.first().copied()).is_some()
     }
 
+    /// `id` and every crate function it (transitively) calls.
+    pub fn reachable(&self, id: FnId) -> Vec<FnId> {
+        let mut seen = vec![id];
+        let mut i = 0;
+        while i < seen.len() && seen.len() < 256 {
+            let f = seen[i];
+            for call in &self.facts[f].calls {
+                for callee in self.resolve(f, call) {
+                    if !seen.contains(&callee) {
+                        seen.push(callee);
+                    }
+                }
+            }
+            i += 1;
+        }
+        seen
+    }
+
+    /// Storage keys (most specific name) written by `id` or anything it calls.
+    pub fn written_keys(&self, id: FnId) -> BTreeSet<String> {
+        self.reachable(id)
+            .into_iter()
+            .flat_map(|f| self.facts[f].state_writes.iter().filter_map(|w| w.key_idents.last().cloned()))
+            .collect()
+    }
+
+    /// Keys checked by `id`'s "already initialized" guards, or `None` when any
+    /// guard's key is unknown (so callers should trust the guard).
+    pub fn init_guard_keys(&self, id: FnId) -> Option<BTreeSet<String>> {
+        let mut keys = BTreeSet::new();
+        for f in self.reachable(id) {
+            for k in &self.facts[f].init_guard_keys {
+                keys.insert(k.clone()?);
+            }
+        }
+        for call in self.facts[id].calls.iter().filter(|c| c.in_condition) {
+            for callee in self.resolve(id, call) {
+                if !self.reads_storage(callee) {
+                    continue;
+                }
+                let read: Vec<String> =
+                    self.reachable(callee).into_iter().flat_map(|f| self.facts[f].read_keys.clone()).collect();
+                if read.is_empty() {
+                    return None;
+                }
+                keys.extend(read);
+            }
+        }
+        Some(keys)
+    }
+
     /// `true` if `id` has an "already initialized" style guard, directly, in a
     /// helper it calls, or by calling a storage-reading helper inside a condition.
     pub fn has_init_guard(&self, id: FnId) -> bool {
@@ -862,6 +915,29 @@ impl FactsVisitor<'_, '_> {
     }
 }
 
+impl FactsVisitor<'_, '_> {
+    /// Key name of the first storage read inside `expr`.
+    fn read_key_in(&self, expr: &Expr) -> Option<String> {
+        struct R<'x, 'a> {
+            b: &'x Bindings<'a>,
+            key: Option<String>,
+        }
+        impl<'ast> Visit<'ast> for R<'_, '_> {
+            fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+                if self.key.is_none() {
+                    if let Some(op) = storage_op(m, self.b).filter(|op| op.kind.is_read()) {
+                        self.key = op.key().and_then(|k| crate::syntax::key_names(k, self.b).pop());
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, m);
+            }
+        }
+        let mut r = R { b: self.bindings, key: None };
+        r.visit_expr(expr);
+        r.key
+    }
+}
+
 impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
     fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
         let name = m.method.to_string();
@@ -938,6 +1014,8 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                 }
                 if op.kind == StorageOpKind::Has || self.cond_depth > 0 {
                     self.facts.init_guards.push(span);
+                    let key = op.key().and_then(|k| crate::syntax::key_names(k, self.bindings).pop());
+                    self.facts.init_guard_keys.push(key);
                 }
             }
         } else if self.opts.auth_functions.contains(&name) {
@@ -1028,6 +1106,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             if let Some(init) = self.bindings.get(&name, Span::of(p).start) {
                 if self.expr_reads_storage(init) {
                     self.facts.init_guards.push(Span::of(p));
+                    self.facts.init_guard_keys.push(self.read_key_in(init));
                 }
             }
         }
