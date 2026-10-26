@@ -19,7 +19,7 @@ fail-on = "warning"
 # Hide findings below this confidence: "low" | "medium" | "high".
 min-confidence = "low"
 
-# Analyze test code too (#[cfg(test)] items, tests/, benches/).
+# Analyze test code too (#[cfg(test)] items and files, tests/, benches/, fuzz_targets/).
 include-tests = false
 
 # Extra glob patterns to skip, relative to each scanned path.

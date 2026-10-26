@@ -9,6 +9,7 @@
 //! | SG-005 | `unprotected-initializer` | `initialize` functions that can be called more than once |
 //! | SG-006 | `negative-amount`         | `i128` amounts written to storage without a sign check |
 //! | SG-007 | `missing-ttl-extension`   | Persistent / instance data whose TTL is never extended |
+//! | SG-008 | `ignored-try-call`        | Discarded results of `client.try_*` cross-contract calls |
 //!
 //! Every rule is a heuristic over source code. See `docs/rules/` for the
 //! detection logic, known false positives and false negatives of each rule.
@@ -22,6 +23,7 @@ mod sg004_unbounded_iteration;
 mod sg005_unprotected_init;
 mod sg006_negative_amount;
 mod sg007_missing_ttl_extension;
+mod sg008_ignored_try_call;
 mod util;
 
 #[cfg(test)]
@@ -34,6 +36,7 @@ pub use sg004_unbounded_iteration::UnboundedIteration;
 pub use sg005_unprotected_init::UnprotectedInitializer;
 pub use sg006_negative_amount::NegativeAmount;
 pub use sg007_missing_ttl_extension::MissingTtlExtension;
+pub use sg008_ignored_try_call::IgnoredTryCall;
 
 /// All built-in rules, ordered by ID.
 pub fn all() -> Vec<Box<dyn Rule>> {
@@ -45,6 +48,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(UnprotectedInitializer),
         Box::new(NegativeAmount),
         Box::new(MissingTtlExtension),
+        Box::new(IgnoredTryCall),
     ]
 }
 

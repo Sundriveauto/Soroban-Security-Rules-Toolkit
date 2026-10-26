@@ -39,6 +39,7 @@ note: stellar-guard reports potential issues found by source-level heuristics. F
 | [SG-005](docs/rules/SG-005.md) | `unprotected-initializer` | error | `initialize`-style functions that can be called more than once |
 | [SG-006](docs/rules/SG-006.md) | `negative-amount` | warning | `i128` amounts written to contract storage without rejecting negative values |
 | [SG-007](docs/rules/SG-007.md) | `missing-ttl-extension` | info | Persistent / instance data whose TTL is never extended on-chain |
+| [SG-008](docs/rules/SG-008.md) | `ignored-try-call` | warning | Discarded results of `client.try_*` cross-contract calls |
 
 Every rule follows helper functions across the crate, reports a **confidence** level, and is tested
 against both vulnerable and safe code. Each rule page lists its known false positives and false

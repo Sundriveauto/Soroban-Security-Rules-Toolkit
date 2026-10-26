@@ -31,7 +31,7 @@ flowchart TD
 ### guard-parser
 
 * `discover` — walks each path (sorted, deterministic), skipping `target/`, `node_modules/`, hidden
-  directories, and by default `tests/`, `benches/` and `test_snapshots/`. User globs are matched
+  directories, and by default `tests/`, `benches/`, `test_snapshots/` and cargo-fuzz `fuzz_targets/`. User globs are matched
   relative to the scan root.
 * `project` — reads and parses files with `syn` (`span-locations` gives line/column). Unless
   `include-tests` is set, items annotated `#[cfg(test)]` / `#[test]` are removed, and out-of-line
