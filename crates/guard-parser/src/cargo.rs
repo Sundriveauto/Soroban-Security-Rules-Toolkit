@@ -18,6 +18,16 @@ pub struct CrateInfo {
     /// `overflow-checks` for the release profile: `Some(true)`/`Some(false)` when
     /// a manifest was found, `None` when unknown.
     pub overflow_checks: Option<bool>,
+    /// Names of local dependencies (`path = ".."` or `workspace = true`), with `-`
+    /// replaced by `_`. Helpers in these crates are followed when resolving calls.
+    pub local_deps: Vec<String>,
+}
+
+impl CrateInfo {
+    /// Package name as used in Rust paths (`my-lib` → `my_lib`).
+    pub fn rust_name(&self) -> Option<String> {
+        self.name.as_ref().map(|n| n.replace('-', "_"))
+    }
 }
 
 /// Caches manifest lookups so each directory is inspected at most once.
@@ -82,6 +92,27 @@ impl CrateResolver {
 fn read_manifest(path: &Path) -> Option<toml::Table> {
     let text = fs::read_to_string(path).ok()?;
     text.parse::<toml::Table>().ok()
+}
+
+/// Dependencies declared with `path = ".."` or `workspace = true` (normalized names).
+fn local_deps(table: &toml::Table) -> Vec<String> {
+    let mut out: Vec<String> = ["dependencies", "dev-dependencies"]
+        .iter()
+        .filter_map(|k| table.get(*k)?.as_table())
+        .flat_map(|deps| deps.iter())
+        .filter(|(_, spec)| {
+            spec.as_table()
+                .is_some_and(|t| t.contains_key("path") || t.get("workspace").and_then(|w| w.as_bool()) == Some(true))
+        })
+        .map(|(name, spec)| {
+            let real = spec.as_table().and_then(|t| t.get("package")).and_then(|p| p.as_str()).unwrap_or(name);
+            real.replace('-', "_")
+        })
+        .filter(|n| n != "soroban_sdk")
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn has_soroban_dep(table: &toml::Table) -> bool {
@@ -150,7 +181,13 @@ pub fn load_crate_info(dir: &Path) -> CrateInfo {
     // Cargo's release default is `false` when unspecified.
     let overflow_checks = Some(overflow.unwrap_or(false));
 
-    CrateInfo { root: Some(dir.to_path_buf()), name, depends_on_soroban: has_soroban_dep(&manifest), overflow_checks }
+    CrateInfo {
+        root: Some(dir.to_path_buf()),
+        name,
+        depends_on_soroban: has_soroban_dep(&manifest),
+        overflow_checks,
+        local_deps: local_deps(&manifest),
+    }
 }
 
 #[cfg(test)]

@@ -95,9 +95,10 @@ impl Rule for UnboundedIteration {
         if !cx.is_soroban() {
             return;
         }
+        let mut capped = None;
         for (_, f) in cx.model.fns_in_file(cx.file_idx) {
             let bindings = Bindings::collect(f.block);
-            let sources = collect_sources(f, &bindings, cx.model);
+            let sources = collect_sources(f, &bindings, cx.model, &mut capped);
             if sources.is_empty() && !has_direct_storage_iteration(f.block) {
                 continue;
             }
@@ -120,7 +121,12 @@ fn has_direct_storage_iteration(block: &syn::Block) -> bool {
     idents(block).iter().any(|i| i == "storage")
 }
 
-fn collect_sources(f: &FnDef<'_>, bindings: &Bindings<'_>, model: &CrateModel<'_>) -> BTreeMap<String, Source> {
+fn collect_sources(
+    f: &FnDef<'_>,
+    bindings: &Bindings<'_>,
+    model: &CrateModel<'_>,
+    capped: &mut Option<HashSet<String>>,
+) -> BTreeMap<String, Source> {
     let mut sources = BTreeMap::new();
     // Constructor arguments come from the deployer and `__check_auth` contexts are
     // bounded by the transaction itself, so their parameters are not caller-controlled.
@@ -134,11 +140,11 @@ fn collect_sources(f: &FnDef<'_>, bindings: &Bindings<'_>, model: &CrateModel<'_
             }
         }
     }
-    let capped = capped_keys(model);
     for (name, init) in bindings.iter() {
         if !expr_loads_storage(init, bindings, model) || capped_where_written(name, model) {
             continue;
         }
+        let capped = capped.get_or_insert_with(|| capped_keys(model));
         let keys = loaded_keys(init, bindings, model);
         if !keys.is_empty() && keys.iter().all(|k| capped.contains(k)) {
             continue;

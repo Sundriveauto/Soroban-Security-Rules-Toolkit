@@ -32,7 +32,7 @@ pub enum FnKind {
 }
 
 /// A function definition anywhere in the crate.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnDef<'a> {
     pub name: String,
     pub kind: FnKind,
@@ -49,6 +49,8 @@ pub struct FnDef<'a> {
     pub self_ty: Option<String>,
     /// Trait of the enclosing `impl Trait for T` or the trait declaring a default method.
     pub trait_name: Option<String>,
+    /// `true` for functions of a local dependency crate, modelled only so calls into it resolve.
+    pub foreign: bool,
 }
 
 impl FnDef<'_> {
@@ -265,33 +267,53 @@ pub struct Witness {
 impl<'a> CrateModel<'a> {
     /// Builds models for every crate in the project.
     pub fn build_all(project: &'a Project, opts: &ModelOptions) -> Vec<CrateModel<'a>> {
-        (0..project.crates.len().max(1)).map(|id| CrateModel::build(project, id, opts)).collect()
+        // Analyse each crate's own functions once; dependency crates are then shared
+        // (cloned) into every crate that uses them instead of being re-analysed.
+        let n = project.crates.len().max(1);
+        let own: Vec<OwnFns<'a>> = (0..n).map(|id| OwnFns::collect(project, id, opts)).collect();
+        (0..n).map(|id| CrateModel::assemble(project, id, &own)).collect()
     }
 
     pub fn build(project: &'a Project, crate_id: usize, opts: &ModelOptions) -> Self {
-        let mut fns = Vec::new();
-        for (file_idx, file) in project.files.iter().enumerate() {
-            if file.crate_id != crate_id {
+        let n = project.crates.len().max(1);
+        let own: Vec<OwnFns<'a>> = (0..n).map(|id| OwnFns::collect(project, id, opts)).collect();
+        CrateModel::assemble(project, crate_id, &own)
+    }
+
+    fn assemble(project: &'a Project, crate_id: usize, own: &[OwnFns<'a>]) -> Self {
+        let mut fns = own[crate_id].fns.clone();
+        let mut facts = own[crate_id].facts.clone();
+        // Helpers from local dependency crates (`common::require_admin`), so calls into a
+        // shared library crate in the same workspace are followed. Their module paths are
+        // prefixed with the crate name.
+        let deps = project.crates.get(crate_id).map(|c| c.local_deps.clone()).unwrap_or_default();
+        for (i, c) in project.crates.iter().enumerate() {
+            let Some(name) = c.rust_name() else { continue };
+            if i == crate_id || !deps.contains(&name) {
                 continue;
             }
-            let module = file_module_path(&file.path);
-            collect_items(&file.ast.items, file_idx, &module, &mut fns);
+            for (f, fx) in own[i].fns.iter().zip(&own[i].facts) {
+                let mut f = f.clone();
+                f.module.insert(0, name.clone());
+                f.foreign = true;
+                // Exports of a dependency are not this crate's contract interface.
+                if let FnKind::ContractExport { contract, .. } = &f.kind {
+                    f.kind = FnKind::Method { self_ty: contract.clone(), has_self: false };
+                }
+                fns.push(f);
+                facts.push(fx.clone());
+            }
         }
-        let mut consts = HashMap::new();
-        for file in project.files.iter().filter(|f| f.crate_id == crate_id) {
-            collect_consts(&file.ast.items, &mut consts);
-        }
-        let facts = fns.iter().map(|f| collect_facts(f, opts, &consts)).collect();
         let mut by_name: HashMap<String, Vec<FnId>> = HashMap::new();
         for (i, f) in fns.iter().enumerate() {
             by_name.entry(f.name.clone()).or_default().push(i);
         }
-        CrateModel { crate_id, fns, facts, by_name, consts }
+        CrateModel { crate_id, fns, facts, by_name, consts: own[crate_id].consts.clone() }
     }
 
     /// Functions defined in a given file.
     pub fn fns_in_file(&self, file: usize) -> impl Iterator<Item = (FnId, &FnDef<'a>)> {
-        self.fns.iter().enumerate().filter(move |(_, f)| f.file == file)
+        self.fns.iter().enumerate().filter(move |(_, f)| f.file == file && !f.foreign)
     }
 
     /// Functions with the given name.
@@ -323,6 +345,23 @@ impl<'a> CrateModel<'a> {
             return all;
         }
         let from = &self.fns[caller];
+        // A call qualified with a dependency crate's name (`common::f`) refers to its root module.
+        if let Some(q) = call.qualifier.as_deref() {
+            let in_dep_root: Vec<FnId> = all
+                .iter()
+                .copied()
+                .filter(|&id| self.fns[id].foreign && self.fns[id].module.len() == 1 && self.fns[id].module[0] == q)
+                .collect();
+            if !in_dep_root.is_empty() {
+                return in_dep_root;
+            }
+        }
+        // Otherwise prefer this crate's own functions over same-named dependency helpers.
+        let own: Vec<FnId> = all.iter().copied().filter(|&id| self.fns[id].foreign == from.foreign).collect();
+        let all = if own.is_empty() { all } else { own };
+        if all.len() < 2 {
+            return all;
+        }
         let narrowed: Vec<FnId> = match call.qualifier.as_deref() {
             Some("Self") => all.iter().copied().filter(|&id| self.fns[id].self_ty == from.self_ty).collect(),
             Some("crate") => all.iter().copied().filter(|&id| self.fns[id].module.is_empty()).collect(),
@@ -668,6 +707,7 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, module: &[String], out
                 module: module.to_vec(),
                 self_ty: None,
                 trait_name: None,
+                foreign: false,
             }),
             syn::Item::Impl(imp) => {
                 let is_contract = imp.attrs.iter().any(|a| attr_is(a, "contractimpl"));
@@ -697,6 +737,7 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, module: &[String], out
                         module: module.to_vec(),
                         self_ty: Some(self_ty.clone()),
                         trait_name: trait_name.clone(),
+                        foreign: false,
                     });
                 }
             }
@@ -716,6 +757,7 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, module: &[String], out
                         module: module.to_vec(),
                         self_ty: None,
                         trait_name: Some(t.ident.to_string()),
+                        foreign: false,
                     });
                 }
             }
@@ -822,6 +864,30 @@ fn call_qualifier(c: &syn::ExprCall) -> Option<String> {
     }
     let n = p.path.segments.len();
     (n >= 2).then(|| p.path.segments[n - 2].ident.to_string())
+}
+
+/// One crate's own functions with their facts, computed once per scan.
+struct OwnFns<'a> {
+    fns: Vec<FnDef<'a>>,
+    facts: Vec<FnFacts>,
+    consts: HashMap<String, Vec<String>>,
+}
+
+impl<'a> OwnFns<'a> {
+    fn collect(project: &'a Project, crate_id: usize, opts: &ModelOptions) -> Self {
+        let mut fns = Vec::new();
+        let mut consts = HashMap::new();
+        for (file_idx, file) in project.files.iter().enumerate() {
+            if file.crate_id != crate_id {
+                continue;
+            }
+            let module = file_module_path(&file.path);
+            collect_items(&file.ast.items, file_idx, &module, &mut fns);
+            collect_consts(&file.ast.items, &mut consts);
+        }
+        let facts = fns.iter().map(|f| collect_facts(f, opts, &consts)).collect();
+        OwnFns { fns, facts, consts }
+    }
 }
 
 /// Key names of `const` / `static` items, including those in inline modules.
@@ -1360,6 +1426,49 @@ mod tests {
         assert!(writes("qualified"));
         assert!(writes("by_type"));
         assert!(writes("default_method"));
+    }
+
+    #[test]
+    fn follows_helpers_in_local_dependency_crates() {
+        let common = CrateInfo { name: Some("common".into()), ..Default::default() };
+        let vault = CrateInfo { name: Some("vault".into()), local_deps: vec!["common".into()], ..Default::default() };
+        let mut p = Project::from_sources(
+            [(
+                "common/src/lib.rs",
+                "pub fn require_admin(e: &Env) {}
+                 pub fn require_owner_auth(e: &Env) { let a: Address = todo(); a.require_auth(); }
+                 pub fn set(e: &Env) {}",
+            )],
+            common,
+            false,
+        );
+        let v = Project::from_sources(
+            [(
+                "vault/src/lib.rs",
+                "#[contractimpl] impl V {
+                    pub fn fake(e: Env) { common::require_admin(&e); }
+                    pub fn real(e: Env) { require_owner_auth(&e); }
+                 }
+                 fn set(e: &Env) {}",
+            )],
+            vault.clone(),
+            false,
+        );
+        p.files.extend(v.files.into_iter().map(|mut f| {
+            f.crate_id = 1;
+            f
+        }));
+        p.crates.push(vault);
+        let models = CrateModel::build_all(&p, &ModelOptions::default());
+        let m = &models[1];
+        let id = |n: &str| m.by_name(n).iter().copied().find(|&i| !m.fns[i].foreign).unwrap();
+        assert_eq!(m.auth_status(id("fake")), AuthStatus::Never);
+        assert_eq!(m.auth_status(id("real")), AuthStatus::Always);
+        assert_eq!(m.fns_in_file(0).count(), 0, "dependency functions are not reported");
+        // Unqualified `set` prefers the crate's own function.
+        let call = CallSite { name: "set".into(), ..m.facts[id("fake")].calls[0].clone() };
+        let call = CallSite { qualifier: None, ..call };
+        assert!(m.resolve(id("fake"), &call).iter().all(|&c| !m.fns[c].foreign));
     }
 
     #[test]
