@@ -30,7 +30,7 @@ inputs:
     description: Where to write the SARIF report.
     default: stellar-guard.sarif
   upload-sarif:
-    description: Upload the SARIF report to GitHub code scanning (needs `security-events: write`).
+    description: "Upload the SARIF report to GitHub code scanning (needs `security-events: write`)."
     default: "true"
   annotations:
     description: Emit inline annotations on the pull request diff.
