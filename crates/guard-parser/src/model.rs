@@ -40,6 +40,12 @@ pub struct FnDef<'a> {
     pub attrs: &'a [Attribute],
     /// Span of the function name.
     pub name_span: Span,
+    /// Module path inside the crate: file modules (`src/a/b.rs` → `a::b`) plus inline `mod` blocks.
+    pub module: Vec<String>,
+    /// Self type of the enclosing `impl`, if any.
+    pub self_ty: Option<String>,
+    /// Trait of the enclosing `impl Trait for T` or the trait declaring a default method.
+    pub trait_name: Option<String>,
 }
 
 impl FnDef<'_> {
@@ -100,6 +106,11 @@ pub struct CallSite {
     pub span: Span,
     /// Method-call syntax (`x.f()`) rather than path syntax (`f()`, `Self::f()`).
     pub is_method: bool,
+    /// For path calls, the segment before the name: `a` in `a::f()`, `Self` in `Self::f()`,
+    /// `Trait` in `<T as Trait>::f()`.
+    pub qualifier: Option<String>,
+    /// Identifiers passed as arguments (locals and parameters, references stripped).
+    pub arg_idents: Vec<String>,
     /// Call appears inside a condition (`if`, `match`, `assert!` …).
     pub in_condition: bool,
     /// Call runs on only some paths: inside an `if` / `match` arm or a `for` / `while` body.
@@ -210,7 +221,8 @@ impl<'a> CrateModel<'a> {
             if file.crate_id != crate_id {
                 continue;
             }
-            collect_items(&file.ast.items, file_idx, &mut fns);
+            let module = file_module_path(&file.path);
+            collect_items(&file.ast.items, file_idx, &module, &mut fns);
         }
         let facts = fns.iter().map(|f| collect_facts(f, opts)).collect();
         let mut by_name: HashMap<String, Vec<FnId>> = HashMap::new();
@@ -230,9 +242,16 @@ impl<'a> CrateModel<'a> {
         self.by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Crate functions a call site may refer to (name-based, conservative).
-    pub fn resolve(&self, call: &CallSite) -> Vec<FnId> {
-        self.by_name(&call.name)
+    /// Crate functions a call site in `caller` may refer to.
+    ///
+    /// Candidates are found by name, then narrowed by the call's qualifier
+    /// (`a::f` → functions in module `a` or on type/trait `a`, `Self::f` → the
+    /// caller's impl) or, for unqualified calls, by the caller's module. When
+    /// narrowing leaves nothing (e.g. a `use` alias), all same-named candidates
+    /// are kept, so resolution stays conservative.
+    pub fn resolve(&self, caller: FnId, call: &CallSite) -> Vec<FnId> {
+        let all: Vec<FnId> = self
+            .by_name(&call.name)
             .iter()
             .copied()
             .filter(|&id| {
@@ -242,7 +261,44 @@ impl<'a> CrateModel<'a> {
                     true
                 }
             })
-            .collect()
+            .collect();
+        if all.len() < 2 {
+            return all;
+        }
+        let from = &self.fns[caller];
+        let narrowed: Vec<FnId> = match call.qualifier.as_deref() {
+            Some("Self") => all.iter().copied().filter(|&id| self.fns[id].self_ty == from.self_ty).collect(),
+            Some("crate") => all.iter().copied().filter(|&id| self.fns[id].module.is_empty()).collect(),
+            Some("self") => all.iter().copied().filter(|&id| self.fns[id].module == from.module).collect(),
+            Some("super") => {
+                let parent = &from.module[..from.module.len().saturating_sub(1)];
+                all.iter().copied().filter(|&id| self.fns[id].module == parent).collect()
+            }
+            Some(q) => all
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    let f = &self.fns[id];
+                    f.module.last().is_some_and(|m| m == q)
+                        || f.self_ty.as_deref() == Some(q)
+                        || f.trait_name.as_deref() == Some(q)
+                })
+                .collect(),
+            None if call.is_method => match &from.self_ty {
+                Some(ty) => all.iter().copied().filter(|&id| self.fns[id].self_ty.as_ref() == Some(ty)).collect(),
+                None => vec![],
+            },
+            None => all
+                .iter()
+                .copied()
+                .filter(|&id| self.fns[id].module == from.module && self.fns[id].self_ty.is_none())
+                .collect(),
+        };
+        if narrowed.is_empty() {
+            all
+        } else {
+            narrowed
+        }
     }
 
     /// Finds where `pred` holds, either directly in `id` or in any function it
@@ -265,7 +321,7 @@ impl<'a> CrateModel<'a> {
             return Some(Witness { span, via: vec![] });
         }
         for call in &self.facts[id].calls {
-            for callee in self.resolve(call) {
+            for callee in self.resolve(id, call) {
                 if let Some(w) = self.witness_inner(callee, pred, visited) {
                     let mut via = vec![self.fns[callee].name.clone()];
                     via.extend(w.via);
@@ -302,7 +358,7 @@ impl<'a> CrateModel<'a> {
         }
         let mut best = if facts.cond_auth.is_empty() { AuthStatus::Never } else { AuthStatus::Sometimes };
         for call in &facts.calls {
-            let callees = self.resolve(call);
+            let callees = self.resolve(id, call);
             let status = if callees.is_empty() {
                 if call.auth_named {
                     AuthStatus::Always
@@ -336,11 +392,26 @@ impl<'a> CrateModel<'a> {
             .calls
             .iter()
             .filter(|c| c.in_condition)
-            .any(|c| self.resolve(c).into_iter().any(|callee| self.reads_storage(callee)))
+            .any(|c| self.resolve(id, c).into_iter().any(|callee| self.reads_storage(callee)))
     }
 }
 
-fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a>>) {
+/// Module path of a source file inside its crate: `src/lib.rs` → `[]`,
+/// `src/a.rs` and `src/a/mod.rs` → `["a"]`, `src/a/b.rs` → `["a", "b"]`.
+fn file_module_path(path: &std::path::Path) -> Vec<String> {
+    let comps: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let start = comps.iter().rposition(|c| c == "src").map(|i| i + 1).unwrap_or(comps.len().saturating_sub(1));
+    let mut module: Vec<String> = comps[start..].to_vec();
+    if let Some(last) = module.pop() {
+        let stem = last.strip_suffix(".rs").unwrap_or(&last).to_string();
+        if !matches!(stem.as_str(), "lib" | "main" | "mod") {
+            module.push(stem);
+        }
+    }
+    module
+}
+
+fn collect_items<'a>(items: &'a [syn::Item], file: usize, module: &[String], out: &mut Vec<FnDef<'a>>) {
     for item in items {
         match item {
             syn::Item::Fn(f) => out.push(FnDef {
@@ -351,6 +422,9 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a
                 block: &f.block,
                 attrs: &f.attrs,
                 name_span: Span::of(&f.sig.ident),
+                module: module.to_vec(),
+                self_ty: None,
+                trait_name: None,
             }),
             syn::Item::Impl(imp) => {
                 let is_contract = imp.attrs.iter().any(|a| attr_is(a, "contractimpl"));
@@ -377,12 +451,36 @@ fn collect_items<'a>(items: &'a [syn::Item], file: usize, out: &mut Vec<FnDef<'a
                         block: &f.block,
                         attrs: &f.attrs,
                         name_span: Span::of(&f.sig.ident),
+                        module: module.to_vec(),
+                        self_ty: Some(self_ty.clone()),
+                        trait_name: trait_name.clone(),
+                    });
+                }
+            }
+            syn::Item::Trait(t) => {
+                // Default method bodies are callable through every implementor.
+                for it in &t.items {
+                    let syn::TraitItem::Fn(f) = it else { continue };
+                    let Some(block) = &f.default else { continue };
+                    out.push(FnDef {
+                        name: f.sig.ident.to_string(),
+                        kind: FnKind::Method { self_ty: String::new(), has_self: f.sig.receiver().is_some() },
+                        file,
+                        sig: &f.sig,
+                        block,
+                        attrs: &f.attrs,
+                        name_span: Span::of(&f.sig.ident),
+                        module: module.to_vec(),
+                        self_ty: None,
+                        trait_name: Some(t.ident.to_string()),
                     });
                 }
             }
             syn::Item::Mod(m) => {
                 if let Some((_, items)) = &m.content {
-                    collect_items(items, file, out);
+                    let mut inner = module.to_vec();
+                    inner.push(m.ident.to_string());
+                    collect_items(items, file, &inner, out);
                 }
             }
             _ => {}
@@ -409,6 +507,23 @@ fn diverges(expr: &Expr) -> bool {
         }),
         _ => false,
     }
+}
+
+/// The path segment before the function name in a call: `a::f` → `a`,
+/// `<T as Trait>::f` → `Trait`.
+fn call_qualifier(c: &syn::ExprCall) -> Option<String> {
+    let Expr::Path(p) = crate::syntax::strip(&c.func) else { return None };
+    if let Some(q) = &p.qself {
+        if q.position > 0 {
+            return p.path.segments.iter().nth(q.position - 1).map(|s| s.ident.to_string());
+        }
+        return match &*q.ty {
+            syn::Type::Path(tp) => tp.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        };
+    }
+    let n = p.path.segments.len();
+    (n >= 2).then(|| p.path.segments[n - 2].ident.to_string())
 }
 
 fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions) -> FnFacts {
@@ -455,12 +570,22 @@ impl FactsVisitor<'_, '_> {
         }
     }
 
-    fn push_call(&mut self, name: String, span: Span, is_method: bool) {
+    fn push_call<'e>(
+        &mut self,
+        name: String,
+        span: Span,
+        is_method: bool,
+        qualifier: Option<String>,
+        args: impl IntoIterator<Item = &'e Expr>,
+    ) {
         let auth_named = is_auth_helper_name(&name, &[]);
+        let arg_idents = args.into_iter().filter_map(crate::syntax::as_local_ident).collect();
         self.facts.calls.push(CallSite {
             name,
             span,
             is_method,
+            qualifier,
+            arg_idents,
             in_condition: self.cond_depth > 0,
             in_branch: self.branch_depth > 0,
             auth_named,
@@ -553,7 +678,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
         } else if self.opts.auth_functions.contains(&name) {
             self.push_auth(span);
         } else if !matches!(name.as_str(), "require_auth" | "require_auth_for_args") {
-            self.push_call(name, span, true);
+            self.push_call(name, span, true, None, &m.args);
         }
         syn::visit::visit_expr_method_call(self, m);
     }
@@ -564,7 +689,7 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             if self.opts.auth_functions.contains(&name) {
                 self.push_auth(span);
             } else {
-                self.push_call(name, span, false);
+                self.push_call(name, span, false, call_qualifier(c), &c.args);
             }
         }
         syn::visit::visit_expr_call(self, c);
@@ -771,6 +896,68 @@ mod tests {
         assert_eq!(st("arms"), AuthStatus::Always);
         assert_eq!(st("looped"), AuthStatus::Sometimes);
         assert_eq!(st("helper_in_branch"), AuthStatus::Sometimes);
+    }
+
+    #[test]
+    fn resolves_calls_by_module_and_type() {
+        let p = project(
+            r#"
+            mod a { pub fn guard(e: &Env) { let x: Address = e.storage().instance().get(&1u32).unwrap(); x.require_auth(); } }
+            mod b { pub fn guard(e: &Env) {} }
+            pub struct S;
+            impl S { pub fn guard(e: &Env) { let x: Address = todo(); x.require_auth(); } }
+            fn guard(e: &Env) {}
+            #[contractimpl]
+            impl C {
+                pub fn via_b(e: Env) { b::guard(&e); }
+                pub fn via_a(e: Env) { a::guard(&e); }
+                pub fn via_type(e: Env) { S::guard(&e); }
+                pub fn local(e: Env) { guard(&e); }
+                pub fn aliased(e: Env) { other::guard(&e); }
+            }
+        "#,
+        );
+        let m = CrateModel::build(&p, 0, &ModelOptions::default());
+        let st = |n: &str| m.auth_status(m.by_name(n)[0]);
+        assert_eq!(st("via_b"), AuthStatus::Never);
+        assert_eq!(st("via_a"), AuthStatus::Always);
+        assert_eq!(st("via_type"), AuthStatus::Always);
+        assert_eq!(st("local"), AuthStatus::Never, "unqualified call prefers the same module");
+        assert_eq!(st("aliased"), AuthStatus::Always, "unknown qualifier falls back to all candidates");
+        assert_eq!(m.fns[m.by_name("guard")[0]].module, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn follows_trait_impls_and_default_methods() {
+        let p = project(
+            r#"
+            pub trait Store {
+                fn put(e: &Env, v: &Address);
+                fn reset(e: &Env) { e.storage().instance().remove(&K::Admin); }
+            }
+            pub struct S;
+            impl Store for S { fn put(e: &Env, v: &Address) { e.storage().instance().set(&K::Admin, v); } }
+            #[contractimpl]
+            impl C {
+                pub fn qualified(e: Env, n: Address) { <S as Store>::put(&e, &n); }
+                pub fn by_type(e: Env, n: Address) { S::put(&e, &n); }
+                pub fn default_method(e: Env) { S::reset(&e); }
+            }
+        "#,
+        );
+        let m = CrateModel::build(&p, 0, &ModelOptions::default());
+        let writes = |n: &str| m.witness(m.by_name(n)[0], &|_, f| f.state_writes.first().map(|w| w.span)).is_some();
+        assert!(writes("qualified"));
+        assert!(writes("by_type"));
+        assert!(writes("default_method"));
+    }
+
+    #[test]
+    fn file_module_paths() {
+        use std::path::Path;
+        assert!(file_module_path(Path::new("c/src/lib.rs")).is_empty());
+        assert_eq!(file_module_path(Path::new("c/src/a/mod.rs")), vec!["a"]);
+        assert_eq!(file_module_path(Path::new("c/src/a/b.rs")), vec!["a", "b"]);
     }
 
     #[test]
