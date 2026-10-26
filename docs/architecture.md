@@ -59,6 +59,12 @@ flowchart TD
   Traversals track the current call chain (not every function seen), so a helper called twice is
   analysed at both call sites, with a depth limit for very deep chains.
 
+  Code layout: `model/mod.rs` (types, construction, call resolution), `model/items.rs` (functions
+  and constants from parsed files), `model/facts.rs` (the per-function fact visitor),
+  `model/queries.rs` (the queries above) and `model/graph.rs`. Every call site is resolved once when
+  the model is built (`CrateModel::callees`), and `auth_status`, `subject_auth`, `debits` and
+  `reachable` are cached per function, so rules asking the same question share the work.
+
 ### guard-engine
 
 * `Rule` trait: `meta()` (static `RuleMeta`: id, name, summary, description, remediation,

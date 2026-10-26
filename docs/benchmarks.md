@@ -43,7 +43,10 @@ Profiling the 110-file case with `valgrind --tool=callgrind`:
 | Model building and rules | ~21% |
 | Discovery, I/O, crate resolution, reporting | ~16% |
 
-Since then, model building and rules take a larger share (the throughput drop above).
+Profiling OpenZeppelin stellar-contracts (257 files) with the current version: `syn` parsing ~68%,
+model building ~18%, rules and reporting the rest. Parsing cannot be parallelised without
+restructuring, because `syn` trees hold `proc_macro2` tokens that cannot move between threads and
+the model borrows them.
 
 Parsing dominates, so rule changes rarely affect performance noticeably. When adding a rule, avoid
 converting large syntax trees to token streams repeatedly (e.g. calling `syntax::idents` on whole

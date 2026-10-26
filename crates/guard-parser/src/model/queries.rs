@@ -45,8 +45,7 @@ impl<'a> CrateModel<'a> {
     /// Helpers whose names look like auth checks are followed into their bodies
     /// when the crate defines them, so an empty `fn check_admin() {}` does not count.
     pub fn auth_status(&self, id: FnId) -> AuthStatus {
-        let mut visited = HashSet::new();
-        self.auth_status_inner(id, &mut visited)
+        *self.cache.auth_status[id].get_or_init(|| self.auth_status_inner(id, &mut HashSet::new()))
     }
 
     fn auth_status_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> AuthStatus {
@@ -92,7 +91,7 @@ impl<'a> CrateModel<'a> {
 
     /// Which of `id`'s parameters are authorized with `require_auth`, following helpers.
     pub fn subject_auth(&self, id: FnId) -> SubjectAuth {
-        self.subject_auth_inner(id, &mut HashSet::new())
+        self.cache.subject_auth[id].get_or_init(|| self.subject_auth_inner(id, &mut HashSet::new())).clone()
     }
 
     fn subject_auth_inner(&self, id: FnId, stack: &mut HashSet<FnId>) -> SubjectAuth {
@@ -150,7 +149,7 @@ impl<'a> CrateModel<'a> {
     /// Writes that decrease a value keyed by `id`'s parameters (`Balance(from)` set to
     /// `balance - amount`), directly or through helpers such as `spend_balance(&e, &from, amount)`.
     pub fn debits(&self, id: FnId) -> Vec<Debit> {
-        self.debits_inner(id, &mut HashSet::new()).0
+        self.cache.debits[id].get_or_init(|| self.debits_inner(id, &mut HashSet::new()).0).clone()
     }
 
     /// Returns debits plus "value writes": writes keyed by parameters `K` whose value is
@@ -221,6 +220,10 @@ impl<'a> CrateModel<'a> {
 
     /// `id` and every crate function it (transitively) calls.
     pub fn reachable(&self, id: FnId) -> Vec<FnId> {
+        self.cache.reachable[id].get_or_init(|| self.reachable_uncached(id)).clone()
+    }
+
+    fn reachable_uncached(&self, id: FnId) -> Vec<FnId> {
         let mut seen = vec![id];
         let mut i = 0;
         while i < seen.len() && seen.len() < 256 {

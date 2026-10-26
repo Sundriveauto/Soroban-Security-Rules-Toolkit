@@ -16,6 +16,7 @@ use crate::syntax::{
 };
 
 mod facts;
+mod graph;
 mod items;
 mod queries;
 
@@ -269,6 +270,8 @@ pub struct CrateModel<'a> {
     /// Key names of crate-level `const` / `static` items (`const KEY: Symbol =
     /// symbol_short!("ADMIN")` → `KEY` ↦ `["ADMIN"]`), used to resolve storage keys.
     pub consts: HashMap<String, Vec<String>>,
+    graph: graph::CallGraph,
+    cache: graph::QueryCache,
 }
 
 /// The place where a transitive property was found, seen from the queried function.
@@ -324,7 +327,20 @@ impl<'a> CrateModel<'a> {
         for (i, f) in fns.iter().enumerate() {
             by_name.entry(f.name.clone()).or_default().push(i);
         }
-        CrateModel { crate_id, fns, facts, by_name, consts: own[crate_id].consts.clone() }
+        let n = fns.len();
+        let mut model = CrateModel {
+            crate_id,
+            fns,
+            facts,
+            by_name,
+            consts: own[crate_id].consts.clone(),
+            graph: graph::CallGraph::default(),
+            cache: graph::QueryCache::new(n),
+        };
+        model.graph.edges = (0..n)
+            .map(|id| model.facts[id].calls.iter().map(|call| model.resolve_uncached(id, call)).collect())
+            .collect();
+        model
     }
 
     /// Functions defined in a given file.
@@ -345,6 +361,21 @@ impl<'a> CrateModel<'a> {
     /// narrowing leaves nothing (e.g. a `use` alias), all same-named candidates
     /// are kept, so resolution stays conservative.
     pub fn resolve(&self, caller: FnId, call: &CallSite) -> Vec<FnId> {
+        // Call sites of the model itself were resolved when it was built.
+        if let Some(edges) = self.graph.edges.get(caller) {
+            if let Some(i) = self.facts[caller].calls.iter().position(|c| std::ptr::eq(c, call)) {
+                return edges[i].clone();
+            }
+        }
+        self.resolve_uncached(caller, call)
+    }
+
+    /// Callees of call site `index` of `caller`, as resolved when the model was built.
+    pub fn callees(&self, caller: FnId, index: usize) -> &[FnId] {
+        self.graph.edges.get(caller).and_then(|e| e.get(index)).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    fn resolve_uncached(&self, caller: FnId, call: &CallSite) -> Vec<FnId> {
         let all: Vec<FnId> = self
             .by_name(&call.name)
             .iter()
