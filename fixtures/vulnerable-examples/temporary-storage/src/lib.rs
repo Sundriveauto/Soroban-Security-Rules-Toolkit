@@ -1,7 +1,7 @@
 //! VULNERABLE: long-lived state kept in temporary storage, and per-user data
 //! in instance storage.
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map};
 
 #[contracttype]
 #[derive(Clone)]
@@ -11,6 +11,7 @@ pub enum DataKey {
     Balance(Address),
     Allowance(Address, Address),
     LastClaim(Address),
+    Members,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280;
@@ -60,5 +61,14 @@ impl Points {
         let now = env.ledger().sequence();
         env.storage().instance().set(&DataKey::LastClaim(user), &now); // expect: SG-002
         env.storage().instance().extend_ttl(DAY_IN_LEDGERS, 30 * DAY_IN_LEDGERS);
+    }
+
+    /// Every new member is added to one `Map` kept in instance storage.
+    pub fn join(env: Env, member: Address, weight: u32) {
+        member.require_auth();
+        let mut members: Map<Address, u32> =
+            env.storage().instance().get(&DataKey::Members).unwrap_or(Map::new(&env));
+        members.set(member, weight);
+        env.storage().instance().set(&DataKey::Members, &members); // expect: SG-002
     }
 }
