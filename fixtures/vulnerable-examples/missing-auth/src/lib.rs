@@ -74,7 +74,7 @@ impl Vault {
 
     /// Anyone can overwrite anyone's balance (write happens in a helper).
     pub fn credit(env: Env, user: Address, amount: i128) {
-        write_balance(&env, &user, amount); // expect: SG-001
+        write_balance(&env, &user, amount); // expect: SG-001, SG-006
     }
 
     /// The helper's name suggests an admin check, but its body does not authorize.
@@ -99,7 +99,7 @@ impl Vault {
         if balance < amount {
             panic!("insufficient balance");
         }
-        write_balance(&env, &from, balance - amount); // expect: SG-001
+        write_balance(&env, &from, balance - amount); // expect: SG-001, SG-006
         let credited = read_balance(&env, &caller).checked_add(amount).expect("overflow");
         write_balance(&env, &caller, credited);
     }

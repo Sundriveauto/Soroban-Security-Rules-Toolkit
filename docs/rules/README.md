@@ -7,6 +7,7 @@
 | [SG-003](SG-003.md) | `unchecked-arithmetic` | warning | Plain `+ - *` and lossy `as` casts on token amounts |
 | [SG-004](SG-004.md) | `unbounded-iteration` | warning | Loops over storage-backed or caller-supplied collections without a bound |
 | [SG-005](SG-005.md) | `unprotected-initializer` | error | `initialize`-style functions that can be called more than once |
+| [SG-006](SG-006.md) | `negative-amount` | warning | `i128` amounts written to storage without rejecting negative values |
 
 Every rule is a **source-level heuristic**. Each page lists what the rule detects, why it matters,
 an example and fix, known false positives / false negatives, and its options.

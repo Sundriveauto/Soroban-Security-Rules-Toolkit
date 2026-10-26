@@ -37,6 +37,7 @@ note: stellar-guard reports potential issues found by source-level heuristics. F
 | [SG-003](docs/rules/SG-003.md) | `unchecked-arithmetic` | warning | Plain `+ - *` and lossy `as` casts on token amounts (aware of `overflow-checks`) |
 | [SG-004](docs/rules/SG-004.md) | `unbounded-iteration` | warning | Loops over storage-backed or caller-supplied collections without a bound |
 | [SG-005](docs/rules/SG-005.md) | `unprotected-initializer` | error | `initialize`-style functions that can be called more than once |
+| [SG-006](docs/rules/SG-006.md) | `negative-amount` | warning | `i128` amounts written to contract storage without rejecting negative values |
 
 Every rule follows helper functions across the crate, reports a **confidence** level, and is tested
 against both vulnerable and safe code. Each rule page lists its known false positives and false

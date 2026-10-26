@@ -160,6 +160,9 @@ pub struct CallArg {
     pub local: Option<String>,
     /// The argument is computed by subtraction (`balance - amount`).
     pub decreasing: bool,
+    /// Lowercase locals the argument is built from, following local bindings
+    /// (`balance.checked_add(amount)` → `amount`, `balance`, …).
+    pub mentions: Vec<String>,
 }
 
 /// How reliably a function performs an authorization check.
@@ -987,7 +990,11 @@ impl FactsVisitor<'_, '_> {
         let auth_named = is_auth_helper_name(&name, &[]);
         let args = args
             .into_iter()
-            .map(|a| CallArg { local: plain_local(a), decreasing: is_decreasing(a, self.bindings) })
+            .map(|a| CallArg {
+                local: plain_local(a),
+                decreasing: is_decreasing(a, self.bindings),
+                mentions: locals_in(a, self.bindings),
+            })
             .collect();
         self.facts.calls.push(CallSite {
             name,

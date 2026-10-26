@@ -44,14 +44,14 @@ impl Points {
         let admin: Address = env.storage().temporary().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         let balance = read_balance(&env, &to).checked_add(amount).expect("overflow");
-        write_balance(&env, &to, balance);
+        write_balance(&env, &to, balance); // expect: SG-006
     }
 
     /// Allowances with an expiry belong in temporary storage: not reported.
     pub fn approve(env: Env, from: Address, spender: Address, amount: i128, live_for: u32) {
         from.require_auth();
         let key = DataKey::Allowance(from, spender);
-        env.storage().temporary().set(&key, &amount);
+        env.storage().temporary().set(&key, &amount); // expect: SG-006
         env.storage().temporary().extend_ttl(&key, live_for, live_for);
     }
 
