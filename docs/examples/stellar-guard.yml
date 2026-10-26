@@ -1,0 +1,38 @@
+# Sample workflow: copy to .github/workflows/stellar-guard.yml in your contract repository.
+name: stellar-guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    name: Soroban security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: stellar-guard
+        id: guard
+        uses: petermuazu/Soroban-Security-Rules-Toolkit/integrations/github-action@v0.1.0
+        with:
+          # Directory (or directories, space separated) containing your contracts.
+          path: contracts
+          # Fail on warnings and errors; use "error" to only block on errors.
+          fail-on: warning
+          # Hide low-confidence findings.
+          min-confidence: medium
+          # Code scanning upload is not permitted for pull requests from forks.
+          upload-sarif: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+
+      - name: Keep the SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stellar-guard-sarif
+          path: ${{ steps.guard.outputs.sarif-file }}

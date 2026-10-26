@@ -1,0 +1,20 @@
+# Rules
+
+| ID | Name | Default severity | Detects |
+|---|---|---|---|
+| [SG-001](SG-001.md) | `missing-authorization` | warning | Exported functions that write state, move funds out or upgrade the contract without `require_auth` |
+| [SG-002](SG-002.md) | `storage-tier-misuse` | warning | Long-lived state in temporary storage; per-user data in instance storage |
+| [SG-003](SG-003.md) | `unchecked-arithmetic` | warning | Plain `+ - *` and lossy `as` casts on token amounts |
+| [SG-004](SG-004.md) | `unbounded-iteration` | warning | Loops over storage-backed or caller-supplied collections without a bound |
+| [SG-005](SG-005.md) | `unprotected-initializer` | error | `initialize`-style functions that can be called more than once |
+
+Every rule is a **source-level heuristic**. Each page lists what the rule detects, why it matters,
+an example and fix, known false positives / false negatives, and its options.
+
+Run `stellar-guard explain <ID>` for the same information in the terminal.
+
+## Rule ID policy
+
+* IDs are permanent. A removed rule's ID is never reused.
+* Changing what a rule detects in a way that adds findings is noted in the changelog.
+* New rules take the next free number; see [CONTRIBUTING.md](../../CONTRIBUTING.md#adding-a-rule).
