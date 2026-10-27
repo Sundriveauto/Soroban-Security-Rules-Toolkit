@@ -7,7 +7,7 @@ This page records the results so precision regressions are visible.
 | Repository | Commit | Files | error | warning | info |
 |---|---|---|---|---|---|
 | [stellar/soroban-examples](https://github.com/stellar/soroban-examples) | `03d42aa` (2026-10-06) | 106 | 0 | 3 | 59 |
-| [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 0 | 16 | 35 |
+| [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 0 | 16 | 38 |
 | [code-423n4/2025-02-blend](https://github.com/code-423n4/2025-02-blend) (Blend v2, audited code) | `f23b326` (2025-02-24) | 67 | 0 | 11 | 60 |
 | [code-423n4/2025-10-reflector](https://github.com/code-423n4/2025-10-reflector) (Reflector V3, audited code) | `21676f3` | 15 | 0 | 1 | 4 |
 
@@ -39,9 +39,46 @@ dependency enables `testutils`, e.g. Blend's `test-suites` and mock contracts).
 | SG-004 | 3 | 3 | `ClaimsByTopic` claim ids (no cap) and `ClaimTopicIssuers` (bounded only indirectly by `MAX_ISSUERS`). Previously 10: caps checked with `==`, lists mapped from capped or caller-supplied inputs, and lists returned by cross-contract calls are now recognised. |
 | SG-005 | 0 | 0 | |
 | SG-006 | 0 | 2 | Admin-only minting-limit setters (`sac-admin-generic`). |
-| SG-007 | 0 | 4 | Example contracts (`ownable`, `pausable`, …) that never extend instance TTL. |
+| SG-007 | 0 | 7 | Example contracts (`ownable`, `pausable`, …) that never extend instance TTL; the lazy-upgrade demo never extends `Score` / `ScoreVersion` while extending other keys. |
 | SG-008 | 2 | 0 | `smart_account` deliberately ignores `try_uninstall` of an untrusted policy; a "review and suppress" case. |
 | SG-009 | 0 | 0 | |
+
+## Recall on independently reported bugs
+
+[`scripts/real_bugs.py`](../scripts/real_bugs.py) checks out public Soroban repositories at the
+commit a GitHub issue was filed against and checks whether the reported bug is flagged by the
+expected rule, in the reported file and function. The issues were written by other people (project
+maintainers, contributors and auditors), not seeded by us. These are smaller projects than the ones
+above; the cases are bugs in the classes stellar-guard targets.
+
+| Set | Cases | Before tuning | After |
+|---|---|---|---|
+| Development: rules were improved while looking at these | 18 | 14 / 18 | **18 / 18** |
+| Held out: collected afterwards, scored before any change | 21 | **11 / 21** | 17 / 21 after one general fix |
+
+The held-out "before" number is the honest estimate for unseen bugs. The one fix made after scoring
+it (initializers that authorize only a caller-supplied `admin` are front-runnable) addressed a
+pattern four independent reports describe, and changed no finding on the four codebases above.
+
+Per class (held out, before → after): missing authorization 3/3 → 3/3, front-runnable initializers
+5/10 → 10/10, TTL 2/3 → 2/3, unbounded iteration 1/5 → 2/5.
+
+Still missed, by design or as known limits:
+
+* `soroban-ajo#856`: instance TTL is extended, but only in two functions; the rule does not judge
+  how often a function runs.
+* `sorostream#727`: a loop over a range computed from timestamps, not from storage or arguments.
+* `Receipta#47`: no loop; a getter returns a whole stored vector.
+* `txwatch#209`: a loop bounded by `min(offset + limit, ids.len())`; the bound is visible, the
+  missing `MAX_BATCH_SIZE` check is not.
+
+`Navin-xmr/navin-contracts#987` was excluded: the loop it reports does not exist anywhere in the
+file's history.
+
+```sh
+python3 scripts/real_bugs.py <cache dir> target/release/stellar-guard            # development set
+python3 scripts/real_bugs.py <cache dir> target/release/stellar-guard --heldout  # held-out set
+```
 
 ## Blend v2 against its public audit
 
@@ -133,6 +170,8 @@ python3 scripts/seeded_bugs.py <soroban-examples checkout at 03d42aa> target/rel
   reading the payload.
 * `#![cfg(test)]` files and cargo-fuzz `fuzz_targets/` are excluded as test code.
 * Crates that enable `testutils` in regular dependencies are excluded as test code (Blend).
+* SG-007 checks persistent TTL extensions per key family (Heliobond, identity-credentials-sdk).
+* SG-005 reports front-runnable initializers (5 of 10 held-out reports before the fix, 10 of 10 after).
 * Keys built only from constants (`Symbol::new(e, ADMIN_KEY)`) are single keys (−14 SG-002 on Blend).
 * Enum variants cast to integers are not token amounts (−9 SG-003 on Blend).
 * SG-004 traces where a collection's length comes from (−7 on OpenZeppelin).

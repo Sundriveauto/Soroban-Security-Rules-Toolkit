@@ -53,6 +53,18 @@ impl Rule for UnprotectedInitializer {
             if model.has_init_guard(id) {
                 if let Some(d) = guard_never_set(model, id, f) {
                     out.push(d);
+                } else if model.auth_status(id) == guard_parser::AuthStatus::Never {
+                    out.push(front_runnable(f, None));
+                } else {
+                    // `admin.require_auth()` on a caller-supplied `admin` proves nothing: a
+                    // front-runner passes and signs for their own address.
+                    let auth = model.subject_auth(id);
+                    if !auth.other && !auth.params.is_empty() {
+                        let params = f.params();
+                        let names: Vec<String> =
+                            auth.params.iter().filter_map(|&i| params.get(i)).map(|(n, _)| format!("`{n}`")).collect();
+                        out.push(front_runnable(f, Some(names.join(", "))));
+                    }
                 }
                 continue;
             }
@@ -69,6 +81,30 @@ impl Rule for UnprotectedInitializer {
             );
         }
     }
+}
+
+/// A guarded initializer that authorizes nobody runs as a separate transaction
+/// after deployment, so whoever calls it first chooses the admin and configuration.
+fn front_runnable(f: &guard_parser::FnDef<'_>, authorized_params: Option<String>) -> Diagnostic {
+    let why = match authorized_params {
+        None => "authorizes nobody".to_string(),
+        Some(p) => format!("only authorizes the caller-supplied {p}, which a front-runner sets to their own address"),
+    };
+    Diagnostic::new(
+        f.name_span,
+        format!(
+            "`{}` can be front-run: it runs after deployment and {why}, so the first caller sets the \
+contract's configuration",
+            f.name
+        ),
+        Confidence::Medium,
+    )
+    .with_severity(Severity::Warning)
+    .in_function(&f.name)
+    .with_help(
+        "Initialize in `__constructor`, which runs atomically with deployment, or require authorization from \
+an address fixed at build time (e.g. the deployer).",
+    )
 }
 
 /// The initializer checks a key (`has(&DataKey::Initialized)`) that it never
@@ -119,6 +155,53 @@ mod tests {
     use super::*;
     use crate::test_util::*;
 
+    #[test]
+    fn guarded_initializer_without_auth_can_be_front_run() {
+        let f = run(
+            Box::new(UnprotectedInitializer),
+            r#"
+#[contractimpl]
+impl C {
+    pub fn initialize(e: Env, admin: Address) {
+        if e.storage().instance().has(&DataKey::Admin) { panic!("already initialised") }
+        e.storage().instance().set(&DataKey::Admin, &admin);
+    }
+}
+#[contractimpl]
+impl D {
+    pub fn init(e: Env, admin: Address) {
+        if e.storage().instance().has(&DataKey::Admin) { panic!("already initialised") }
+        admin.require_auth();
+        e.storage().instance().set(&DataKey::Admin, &admin);
+    }
+}
+"#,
+        );
+        assert_eq!(f.len(), 2, "{f:#?}");
+        assert!(f.iter().all(|x| x.message.contains("front-run") && x.severity == Severity::Warning));
+        assert!(f[0].message.contains("authorizes nobody"), "{}", f[0].message);
+        assert!(f[1].message.contains("caller-supplied `admin`"), "{}", f[1].message);
+    }
+
+    #[test]
+    fn initializer_authorized_by_a_stored_or_fixed_address_is_not_front_runnable() {
+        let f = run(
+            Box::new(UnprotectedInitializer),
+            r#"
+#[contractimpl]
+impl C {
+    pub fn initialize(e: Env, token: Address) {
+        if e.storage().instance().has(&DataKey::Token) { panic!("already initialised") }
+        let deployer: Address = e.storage().instance().get(&DataKey::Deployer).unwrap();
+        deployer.require_auth();
+        e.storage().instance().set(&DataKey::Token, &token);
+    }
+}
+"#,
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
     fn check(src: &str) -> Vec<guard_engine::Finding> {
         run(Box::new(UnprotectedInitializer), src)
     }
@@ -146,6 +229,8 @@ impl C {
 fn is_init(e: &Env) -> bool { e.storage().instance().get(&K::Initialized).unwrap_or(false) }
 "#,
         );
+        // `init_ok` and `init_flag` are also front-runnable (no auth); that is a separate finding.
+        let f: Vec<_> = f.into_iter().filter(|x| !x.message.contains("front-run")).collect();
         assert_eq!(f.len(), 1, "{f:#?}");
         assert!(f[0].message.contains("checks `Init`"), "{}", f[0].message);
         assert_eq!(f[0].confidence, Confidence::High);
@@ -206,7 +291,8 @@ impl C {
 }
 "#,
         );
-        assert!(f.is_empty(), "{f:#?}");
+        // Every guard is recognised; what remains is only the front-running warning (no auth).
+        assert!(f.iter().all(|x| x.message.contains("front-run") && x.severity == Severity::Warning), "{f:#?}");
     }
 
     #[test]

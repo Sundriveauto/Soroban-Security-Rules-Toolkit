@@ -62,15 +62,10 @@ pub struct Vault;
 
 #[contractimpl]
 impl Vault {
-    /// Classic initializer, guarded against re-initialization.
-    pub fn initialize(env: Env, admin: Address, token: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
+    /// Runs once, atomically with deployment, so it cannot be front-run.
+    pub fn __constructor(env: Env, admin: Address, token: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
-        Ok(())
     }
 
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
@@ -95,6 +90,9 @@ impl Vault {
             }
             depositors.push_back(from);
             env.storage().persistent().set(&DataKey::Depositors, &depositors);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::Depositors, TTL_THRESHOLD, TTL_EXTEND_TO);
         }
         Ok(())
     }

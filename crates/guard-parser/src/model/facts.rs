@@ -104,6 +104,7 @@ pub(super) fn collect_facts(def: &FnDef<'_>, opts: &ModelOptions, consts: &HashM
         facts: FnFacts { auth_attr: def.attrs.iter().any(is_auth_attr), ..Default::default() },
         cond_depth: 0,
         branch_depth: 0,
+        loop_keys: HashMap::new(),
     };
     v.visit_block(def.block);
     v.facts
@@ -117,6 +118,8 @@ struct FactsVisitor<'b, 'a> {
     cond_depth: usize,
     /// > 0 inside code that runs on some paths only.
     branch_depth: usize,
+    /// Loop variables over a fixed list of keys: `for key in [K::A, K::B] { .. }`.
+    loop_keys: HashMap<String, Vec<String>>,
 }
 
 impl FactsVisitor<'_, '_> {
@@ -156,6 +159,7 @@ impl FactsVisitor<'_, '_> {
                 local: plain_local(a),
                 decreasing: is_decreasing(a, self.bindings),
                 mentions: locals_in(a, self.bindings),
+                key: key_id(&self.key_names(a)),
             })
             .collect();
         self.facts.calls.push(CallSite {
@@ -251,7 +255,9 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
             }
             "update_current_contract_wasm" | "update_current_contract" => self.facts.upgrades.push(span),
             "extend_ttl_for_contract_instance" | "extend_ttl_for_code" => {
-                self.facts.ttl_extends.push(Some(StorageTier::Instance))
+                self.facts.ttl_extends.push(Some(StorageTier::Instance));
+                self.facts.ttl_extend_keys.push(None);
+                self.facts.ttl_extend_key_locals.push(None);
             }
             "transfer" | "transfer_from" => {
                 let from_contract = m
@@ -267,6 +273,21 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
         let op = storage_op(m, self.bindings);
         if let Some(op) = op.as_ref().filter(|op| op.kind == StorageOpKind::ExtendTtl) {
             self.facts.ttl_extends.push(op.tier);
+            let local = op.key().and_then(plain_local);
+            if let Some(keys) = local.as_ref().and_then(|l| self.loop_keys.get(l)).cloned() {
+                // One extension per key of the list (keeps the three vectors parallel).
+                for (i, k) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        self.facts.ttl_extends.push(op.tier);
+                    }
+                    self.facts.ttl_extend_keys.push(Some(k));
+                    self.facts.ttl_extend_key_locals.push(None);
+                }
+            } else {
+                let key = op.key().and_then(|k| key_id(&self.key_names(k)));
+                self.facts.ttl_extend_keys.push(key);
+                self.facts.ttl_extend_key_locals.push(local);
+            }
         }
         if let Some(op) = op {
             if op.kind.is_write() {
@@ -382,6 +403,12 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
         self.visit_expr(&e.expr);
+        if let (Some(name), Expr::Array(arr)) = (crate::syntax::pat_ident(&e.pat), crate::syntax::strip(&e.expr)) {
+            let keys: Vec<String> = arr.elems.iter().filter_map(|el| key_id(&self.key_names(el))).collect();
+            if keys.len() == arr.elems.len() {
+                self.loop_keys.insert(name, keys);
+            }
+        }
         // The body may run zero times.
         self.branch(|s| s.visit_block(&e.body));
     }
@@ -463,4 +490,15 @@ fn call_takes_values(c: &syn::ExprCall) -> bool {
         }
     }
     c.args.iter().any(|a| !fixed(a))
+}
+
+/// Identity of a storage key family for matching writes to TTL extensions:
+/// `Type::Variant` when the key names its enum (`DidKey::Doc` and `GdprKey::Doc`
+/// differ), otherwise its most specific name.
+pub fn key_id(names: &[String]) -> Option<String> {
+    match names {
+        [.., ty, variant] if ty.starts_with(|c: char| c.is_ascii_uppercase()) => Some(format!("{ty}::{variant}")),
+        [.., last] => Some(last.clone()),
+        [] => None,
+    }
 }

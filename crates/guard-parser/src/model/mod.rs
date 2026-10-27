@@ -21,6 +21,7 @@ mod items;
 mod queries;
 
 use facts::collect_facts;
+pub use facts::key_id;
 #[cfg(test)]
 use items::file_module_path;
 pub use items::resolve_const_key;
@@ -174,6 +175,8 @@ pub struct CallArg {
     /// Lowercase locals the argument is built from, following local bindings
     /// (`balance.checked_add(amount)` → `amount`, `balance`, …).
     pub mentions: Vec<String>,
+    /// Storage-key family the argument names (`&DataKey::Did(id)` → `DataKey::Did`), if any; see [`key_id`].
+    pub key: Option<String>,
 }
 
 /// How reliably a function performs an authorization check.
@@ -214,6 +217,12 @@ pub struct FnFacts {
     /// TTL extensions by tier: `storage().<tier>().extend_ttl(..)`; the deployer's
     /// `extend_ttl_for_contract_instance` / `extend_ttl` count as instance.
     pub ttl_extends: Vec<Option<StorageTier>>,
+    /// Key family extended by each entry of `ttl_extends` (see [`key_id`]); `None` when it is
+    /// unknown (a `key` parameter of a generic helper) or the whole instance.
+    pub ttl_extend_keys: Vec<Option<String>>,
+    /// For each entry of `ttl_extends`, the plain local or parameter used as the key
+    /// (`extend_ttl(key, ..)` in a helper), so callers can supply the key name.
+    pub ttl_extend_key_locals: Vec<Option<String>>,
     /// Checks for existing state (`has`, or a `get` used in a condition).
     pub init_guards: Vec<Span>,
     /// Key checked by each entry of `init_guards` (most specific name), when known.

@@ -44,8 +44,10 @@ note: stellar-guard reports potential issues found by source-level heuristics. F
 
 Every rule follows helper functions across the crate (and into local dependency crates), reports a
 **confidence** level, and is tested against both vulnerable and safe code. Each rule page lists its
-known false positives and false negatives. Recall is measured by seeding bugs into real contracts
-([docs/validation.md](docs/validation.md#recall-on-seeded-bugs)).
+known false positives and false negatives. [docs/validation.md](docs/validation.md) measures noise on
+OpenZeppelin, soroban-examples and two audited codebases (Blend v2, Reflector V3), recall on
+bugs seeded into real contracts, and recall on 39 bugs reported in GitHub issues of public
+Soroban projects (held out: 11 / 21 before tuning, 17 / 21 after).
 
 ## Install
 

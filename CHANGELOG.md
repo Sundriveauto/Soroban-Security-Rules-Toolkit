@@ -29,6 +29,13 @@ are listed under **Changed**.
 - SG-004 recognises length caps checked in helpers or where the storage key is written, under any
   variable name (4 fewer false positives on OpenZeppelin stellar-contracts).
 - SG-005 reports initializer guards on a key the initializer never writes.
+- SG-005 reports guarded initializers that can be front-run (warning): they authorize nobody, or
+  only addresses passed in as arguments. Use `__constructor`.
+- SG-007 checks persistent TTL extensions per key family: when a crate extends some persistent keys,
+  each other key family written but never extended is reported. Keys are followed through helpers,
+  `store(key, value)` wrappers and `for key in [..]` loops.
+- Recall on independently reported bugs (`scripts/real_bugs.py`): 18 / 18 on the development set,
+  11 / 21 on a held-out set before changes and 17 / 21 after (see `docs/validation.md`).
 - SG-001 reports a storage write without authorization as a high-confidence warning when the
   function's comment says it is admin- or owner-only, and as a medium-confidence warning when the
   contract's other setters all authorize (previously both were low-confidence `info`). This turns
