@@ -15,7 +15,7 @@ pub struct Admin;
 #[contractimpl]
 impl Admin {
     pub fn set_admin(e: Env, admin: Address) {
-        e.storage().instance().set(&DataKey::Admin, &admin); // expect: SG-001, SG-010
+        e.storage().instance().set(&DataKey::Admin, &admin); // expect: SG-001, SG-007, SG-010
     }
 
     pub fn pause(e: Env) {
