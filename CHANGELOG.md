@@ -27,6 +27,10 @@ are listed under **Changed**.
 - SG-004 recognises length caps checked in helpers or where the storage key is written, under any
   variable name (4 fewer false positives on OpenZeppelin stellar-contracts).
 - SG-005 reports initializer guards on a key the initializer never writes.
+- SG-004 traces where a collection's length comes from: lists built element-wise from parameters or
+  returned by cross-contract calls are no longer treated as storage-backed, `len() == MAX` counts as
+  a cap, and lists derived from a capped stored list inherit the cap (OpenZeppelin stellar-contracts:
+  10 → 3 warnings, recall unchanged at 12 / 12).
 - Calls are resolved by module path, impl type and trait (`a::f`, `Self::f`, `<T as Tr>::f`), trait
   default methods are modelled, and helpers in local dependency crates of the same workspace are
   followed.

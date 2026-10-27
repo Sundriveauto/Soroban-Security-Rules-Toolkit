@@ -7,7 +7,7 @@ This page records the results so precision regressions are visible.
 | Repository | Commit | Files | error | warning | info |
 |---|---|---|---|---|---|
 | [stellar/soroban-examples](https://github.com/stellar/soroban-examples) | `03d42aa` (2026-10-06) | 109 | 0 | 3 | 59 |
-| [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 0 | 23 | 35 |
+| [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 0 | 16 | 35 |
 
 Command: `stellar-guard scan <repo> --no-config` (defaults: tests excluded, all rules).
 soroban-examples counts 109 files since `#![cfg(test)]` files and cargo-fuzz targets are excluded
@@ -34,7 +34,7 @@ as test code.
 | SG-001 | 5 | 3 | Permissionless functions in example contracts (e.g. a Merkle airdrop `claim`, a lazy-upgrade demo). |
 | SG-002 | 6 | 0 | |
 | SG-003 | 0 | 23 | |
-| SG-004 | 10 | 3 | Loops over stored lists whose cap is kept in a separate counter or not visible (see the rule's limitations). |
+| SG-004 | 3 | 3 | `ClaimsByTopic` claim ids (no cap) and `ClaimTopicIssuers` (bounded only indirectly by `MAX_ISSUERS`). Previously 10: caps checked with `==`, lists mapped from capped or caller-supplied inputs, and lists returned by cross-contract calls are now recognised. |
 | SG-005 | 0 | 0 | |
 | SG-006 | 0 | 2 | Admin-only minting-limit setters (`sac-admin-generic`). |
 | SG-007 | 0 | 4 | Example contracts (`ownable`, `pausable`, …) that never extend instance TTL. |

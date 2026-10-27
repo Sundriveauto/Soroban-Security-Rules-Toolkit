@@ -427,7 +427,8 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
         use syn::BinOp::*;
-        if self.cond_depth > 0 && matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) {
+        // `==` / `!=` count too: `if roles.len() == MAX_ROLES { panic!() }` caps a list grown one at a time.
+        if self.cond_depth > 0 && matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_) | Eq(_) | Ne(_)) {
             for side in [&*b.left, &*b.right] {
                 if let Expr::MethodCall(m) = crate::syntax::strip(side) {
                     if m.method == "len" {

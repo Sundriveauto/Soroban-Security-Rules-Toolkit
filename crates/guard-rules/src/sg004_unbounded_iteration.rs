@@ -103,9 +103,12 @@ impl Rule for UnboundedIteration {
                 continue;
             }
             let bounded = collect_bound_checks(f.block);
+            let capped_keys = capped.get_or_insert_with(|| capped_keys(cx.model));
             let mut v = LoopVisitor {
                 sources: &sources,
                 bounded: &bounded,
+                capped_keys,
+                model: cx.model,
                 bindings: &bindings,
                 function: &f.name,
                 reported_lines: HashSet::new(),
@@ -141,7 +144,7 @@ fn collect_sources(
         }
     }
     for (name, init) in bindings.iter() {
-        if !expr_loads_storage(init, bindings, model) || capped_where_written(name, model) {
+        if !length_from_storage(init, bindings, model, 0) || capped_where_written(name, model) {
             continue;
         }
         let capped = capped.get_or_insert_with(|| capped_keys(model));
@@ -197,13 +200,24 @@ fn capped_keys(model: &CrateModel<'_>) -> HashSet<String> {
 }
 
 /// Storage keys read by `expr`, directly or through crate helpers it calls.
-fn loaded_keys(expr: &Expr, bindings: &Bindings<'_>, model: &CrateModel<'_>) -> Vec<String> {
+fn loaded_keys<'a>(expr: &'a Expr, bindings: &Bindings<'a>, model: &CrateModel<'_>) -> Vec<String> {
     struct V<'x, 'a, 'm> {
         bindings: &'x Bindings<'a>,
         model: &'x CrateModel<'m>,
         keys: Vec<String>,
+        /// Locals followed so far (a collection derived from another local inherits its keys).
+        followed: usize,
     }
-    impl<'ast> Visit<'ast> for V<'_, '_, '_> {
+    impl<'ast> Visit<'ast> for V<'_, 'ast, '_> {
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            let e = Expr::Path(p.clone());
+            if self.followed < 8 {
+                if let Some(init) = self.bindings.resolve(&e) {
+                    self.followed += 1;
+                    self.visit_expr(init);
+                }
+            }
+        }
         fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
             if let Some(op) = storage_op(m, self.bindings) {
                 if op.kind == guard_parser::StorageOpKind::Get {
@@ -240,7 +254,7 @@ fn loaded_keys(expr: &Expr, bindings: &Bindings<'_>, model: &CrateModel<'_>) -> 
             syn::visit::visit_expr_call(self, c);
         }
     }
-    let mut v = V { bindings, model, keys: Vec::new() };
+    let mut v = V { bindings, model, keys: Vec::new(), followed: 0 };
     v.visit_expr(expr);
     v.keys.sort();
     v.keys.dedup();
@@ -272,40 +286,145 @@ fn capped_where_written(name: &str, model: &CrateModel<'_>) -> bool {
     })
 }
 
-/// `true` if `expr` reads from storage directly, or calls a crate helper that
-/// returns a collection and (transitively) reads storage.
-fn expr_loads_storage(expr: &Expr, bindings: &Bindings<'_>, model: &CrateModel<'_>) -> bool {
-    struct V<'x, 'a, 'm> {
-        bindings: &'x Bindings<'a>,
-        model: &'x CrateModel<'m>,
+/// Methods whose result has (at most) the length of their receiver.
+const LENGTH_PRESERVING: &[&str] = &[
+    "iter",
+    "into_iter",
+    "iter_mut",
+    "keys",
+    "values",
+    "map",
+    "filter",
+    "filter_map",
+    "cloned",
+    "copied",
+    "enumerate",
+    "rev",
+    "skip",
+    "inspect",
+    "collect",
+    "to_vec",
+    "clone",
+    "into",
+    "unwrap",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "expect",
+    "ok",
+    "ok_or",
+    "ok_or_else",
+    "as_ref",
+];
+
+/// `true` if the length of the collection `expr` evaluates to is controlled by
+/// contract storage: a stored collection, or one built element-wise from it.
+///
+/// A collection mapped from a parameter (`Vec::from_iter(e, ids.iter().map(|id| load(id)))`)
+/// or returned by a cross-contract call has the length of that input, even when
+/// its elements are read from storage.
+fn length_from_storage(expr: &Expr, bindings: &Bindings<'_>, model: &CrateModel<'_>, depth: usize) -> bool {
+    if depth > 6 {
+        return false;
+    }
+    let e = strip(expr);
+    match e {
+        Expr::MethodCall(m) => {
+            if let Some(op) = storage_op(m, bindings) {
+                return op.kind == guard_parser::StorageOpKind::Get;
+            }
+            LENGTH_PRESERVING.contains(&m.method.to_string().as_str())
+                && length_from_storage(&m.receiver, bindings, model, depth)
+        }
+        Expr::Call(c) => {
+            let Some(name) = call_name(c) else { return false };
+            if name == "from_iter" {
+                return c.args.last().is_some_and(|a| length_from_storage(a, bindings, model, depth));
+            }
+            model.by_name(&name).iter().any(|&id| returns_stored_collection(id, model, depth + 1))
+        }
+        Expr::Path(_) => bindings
+            .resolve(e)
+            .is_some_and(|init| !std::ptr::eq(strip(init), e) && length_from_storage(init, bindings, model, depth + 1)),
+        Expr::Block(b) => block_tail(&b.block).is_some_and(|t| length_from_storage(t, bindings, model, depth)),
+        Expr::If(i) => {
+            let then = block_tail(&i.then_branch);
+            // `if let Some(v) = storage.get(..) { v } else { .. }`
+            let from_pattern = match (strip(&i.cond), then.and_then(as_local_ident)) {
+                (Expr::Let(l), Some(name)) => {
+                    pat_binds(&l.pat, &name) && length_from_storage(&l.expr, bindings, model, depth + 1)
+                }
+                _ => false,
+            };
+            from_pattern
+                || then.is_some_and(|t| length_from_storage(t, bindings, model, depth))
+                || i.else_branch.as_ref().is_some_and(|(_, els)| length_from_storage(els, bindings, model, depth))
+        }
+        // `match storage.get(..) { Some(v) => v, None => .. }`
+        Expr::Match(m) => m.arms.iter().any(|a| {
+            let bound = as_local_ident(&a.body).is_some_and(|name| pat_binds(&a.pat, &name));
+            if bound {
+                length_from_storage(&m.expr, bindings, model, depth + 1)
+            } else {
+                length_from_storage(&a.body, bindings, model, depth)
+            }
+        }),
+        _ => false,
+    }
+}
+
+/// `true` if pattern `pat` binds `name` (`Some(name)`, `Ok(mut name)`, …).
+fn pat_binds(pat: &syn::Pat, name: &str) -> bool {
+    struct P<'n> {
+        name: &'n str,
         hit: bool,
     }
-    impl<'ast> Visit<'ast> for V<'_, '_, '_> {
-        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
-            if storage_op(m, self.bindings).is_some_and(|op| op.kind == guard_parser::StorageOpKind::Get) {
+    impl<'ast> Visit<'ast> for P<'_> {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            if p.ident == self.name {
                 self.hit = true;
             }
-            syn::visit::visit_expr_method_call(self, m);
-        }
-        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
-            if let Some(name) = call_name(c) {
-                for &id in self.model.by_name(&name) {
-                    let def = &self.model.fns[id];
-                    let returns_collection = match &def.sig.output {
-                        syn::ReturnType::Type(_, ty) => is_collection_type(ty),
-                        syn::ReturnType::Default => false,
-                    };
-                    if returns_collection && self.model.reads_storage(id) {
-                        self.hit = true;
-                    }
-                }
-            }
-            syn::visit::visit_expr_call(self, c);
+            syn::visit::visit_pat_ident(self, p);
         }
     }
-    let mut v = V { bindings, model, hit: false };
-    v.visit_expr(expr);
-    v.hit
+    let mut p = P { name, hit: false };
+    p.visit_pat(pat);
+    p.hit
+}
+
+fn block_tail(b: &syn::Block) -> Option<&Expr> {
+    match b.stmts.last()? {
+        syn::Stmt::Expr(e, None) => Some(e),
+        _ => None,
+    }
+}
+
+/// `true` if crate function `id` returns a collection whose length comes from storage.
+fn returns_stored_collection(id: usize, model: &CrateModel<'_>, depth: usize) -> bool {
+    let def = &model.fns[id];
+    let returns_collection = match &def.sig.output {
+        syn::ReturnType::Type(_, ty) => is_collection_type(ty),
+        syn::ReturnType::Default => false,
+    };
+    if !returns_collection || !model.reads_storage(id) {
+        return false;
+    }
+    struct Returns<'a> {
+        out: Vec<&'a Expr>,
+    }
+    impl<'a> Visit<'a> for Returns<'a> {
+        fn visit_expr_return(&mut self, r: &'a syn::ExprReturn) {
+            if let Some(e) = &r.expr {
+                self.out.push(e);
+            }
+        }
+        fn visit_expr_closure(&mut self, _: &'a syn::ExprClosure) {}
+        fn visit_item_fn(&mut self, _: &'a syn::ItemFn) {}
+    }
+    let mut r = Returns { out: block_tail(def.block).into_iter().collect() };
+    r.visit_block(def.block);
+    let bindings = Bindings::collect(def.block);
+    r.out.iter().any(|e| length_from_storage(e, &bindings, model, depth))
 }
 
 /// Names compared in `if` conditions or assertion macros (`if items.len() > MAX`).
@@ -345,9 +464,20 @@ fn collect_bound_checks(block: &syn::Block) -> HashSet<String> {
             }
         }
         fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
-            if self.in_cond > 0 && matches!(b.op, BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_)) {
-                self.names.extend(idents(&*b.left));
-                self.names.extend(idents(&*b.right));
+            if self.in_cond > 0 {
+                if matches!(b.op, BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_)) {
+                    self.names.extend(idents(&*b.left));
+                    self.names.extend(idents(&*b.right));
+                } else if matches!(b.op, BinOp::Eq(_) | BinOp::Ne(_)) {
+                    // Equality bounds only a `.len()` operand (`if v.len() == MAX`).
+                    for side in [&*b.left, &*b.right] {
+                        if let Expr::MethodCall(m) = strip(side) {
+                            if m.method == "len" {
+                                self.names.extend(idents(&*m.receiver));
+                            }
+                        }
+                    }
+                }
             }
             syn::visit::visit_expr_binary(self, b);
         }
@@ -360,6 +490,9 @@ fn collect_bound_checks(block: &syn::Block) -> HashSet<String> {
 struct LoopVisitor<'a, 'b> {
     sources: &'a BTreeMap<String, Source>,
     bounded: &'a HashSet<String>,
+    /// Storage keys whose collection is length-checked where it is written.
+    capped_keys: &'a HashSet<String>,
+    model: &'a CrateModel<'b>,
     bindings: &'a Bindings<'b>,
     function: &'a str,
     reported_lines: HashSet<usize>,
@@ -385,7 +518,17 @@ impl LoopVisitor<'_, '_> {
         // Direct storage read: `for x in env.storage().persistent().get(..).unwrap()`.
         let mut probe = e;
         while let Expr::MethodCall(m) = strip(probe) {
-            if storage_op(m, self.bindings).is_some_and(|op| op.kind == guard_parser::StorageOpKind::Get) {
+            if let Some(op) = storage_op(m, self.bindings).filter(|op| op.kind == guard_parser::StorageOpKind::Get) {
+                let capped = op.key().and_then(|k| {
+                    guard_parser::model::resolve_const_key(
+                        guard_parser::syntax::key_names(k, self.bindings),
+                        &self.model.consts,
+                    )
+                    .pop()
+                });
+                if capped.is_some_and(|k| self.capped_keys.contains(&k)) {
+                    return None;
+                }
                 let key =
                     m.args.first().map(|a| guard_parser::syntax::compact(strip(a))).unwrap_or_else(|| "storage".into());
                 return Some((key, Source::Storage));
@@ -484,6 +627,103 @@ impl C {
 "#,
         );
         assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn equality_cap_where_written_bounds_reads() {
+        let f = check(
+            r#"
+const MAX_ROLES: u32 = 256;
+fn roles(e: &Env) -> Vec<Symbol> { e.storage().persistent().get(&K::Roles).unwrap_or_else(|| Vec::new(e)) }
+#[contractimpl]
+impl C {
+    pub fn add(e: Env, r: Symbol) {
+        let mut existing_roles = roles(&e);
+        if existing_roles.len() == MAX_ROLES { panic!() }
+        existing_roles.push_back(r);
+        e.storage().persistent().set(&K::Roles, &existing_roles);
+    }
+    pub fn remove(e: Env, r: Symbol) {
+        let mut existing_roles = roles(&e);
+        if let Some(i) = existing_roles.iter().position(|x| x == r) { existing_roles.remove(i as u32); }
+    }
+}
+"#,
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn length_follows_the_input_not_the_element_loads() {
+        let f = check(
+            r#"
+fn load_all(e: &Env, ids: &Vec<u32>) -> Vec<Address> {
+    Vec::from_iter(e, ids.iter().map(|id| e.storage().persistent().get(&K::Item(id)).unwrap()))
+}
+fn remote_entries(e: &Env, who: &Address) -> Vec<u32> {
+    let registry: Address = e.storage().instance().get(&K::Registry).unwrap();
+    RegistryClient::new(e, &registry).entries(who)
+}
+#[contractimpl]
+impl C {
+    pub fn a(e: Env) {
+        let entry: Entry = e.storage().persistent().get(&K::Entry).unwrap();
+        let items = load_all(&e, &entry.ids);
+        for i in items.iter() { use_it(&i); }
+    }
+    pub fn b(e: Env, who: Address) {
+        let entries = remote_entries(&e, &who);
+        for x in entries.iter() { use_it(&x); }
+    }
+}
+"#,
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn direct_read_of_a_capped_key_is_bounded() {
+        let f = check(
+            r#"
+const MAX: u32 = 20;
+#[contractimpl]
+impl C {
+    pub fn add(e: Env, k: BytesN<32>, a: Address) {
+        let key = K::Pairs(k);
+        let mut pairs: Vec<Address> = e.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(&e));
+        if pairs.len() >= MAX { panic!() }
+        pairs.push_back(a);
+        e.storage().persistent().set(&key, &pairs);
+    }
+    pub fn list(e: Env, k: BytesN<32>) -> Vec<Address> {
+        let key = K::Pairs(k);
+        let it = e.storage().persistent().get::<_, Vec<Address>>(&key).unwrap().iter().map(|a| a);
+        Vec::from_iter(&e, it)
+    }
+}
+"#,
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
+    fn getter_returning_through_if_let_is_storage_backed() {
+        let f = check(
+            r#"
+fn issuers(e: &Env, t: u32) -> Vec<Address> {
+    if let Some(v) = e.storage().persistent().get::<_, Vec<Address>>(&K::Issuers(t)) { v } else { panic!() }
+}
+fn holders(e: &Env) -> Vec<Address> {
+    match e.storage().persistent().get(&K::Holders) { Some(h) => h, None => Vec::new(e) }
+}
+#[contractimpl]
+impl C {
+    pub fn a(e: Env, t: u32) { let is = issuers(&e, t); for i in is.iter() { use_it(&i); } }
+    pub fn b(e: Env) { let hs = holders(&e); for h in hs.iter() { use_it(&h); } }
+}
+"#,
+        );
+        assert_eq!(lines(&f), vec![10, 11], "{f:#?}");
     }
 
     #[test]
