@@ -1,6 +1,6 @@
 ## stellar-guard results
 
-**1** files scanned · **0** errors · **10** warnings · **2** infos · 0 suppressed
+**1** files scanned · **0** errors · **10** warnings · **4** infos · 0 suppressed
 
 | Severity | Rule | Location | Message | Confidence |
 |---|---|---|---|---|
@@ -8,7 +8,9 @@
 | 🟠 warning | [SG-001](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:62` | Exported function `withdraw` transfers tokens out of the contract without an authorization check | high |
 | 🟠 warning | [SG-001](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:67` | Exported function `set_admin` modifies privileged configuration without an authorization check | high |
 | 🔵 info | [SG-007](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:67` | This contract writes instance storage but never extends its TTL; entries will be archived when their TTL expires | medium |
+| 🔵 info | [SG-010](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:67` | Exported function `set_admin` modifies privileged configuration without publishing a Soroban event | high |
 | 🟠 warning | [SG-001](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:72` | Exported function `upgrade` upgrades the contract WASM without an authorization check | high |
+| 🔵 info | [SG-010](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:72` | Exported function `upgrade` upgrades the contract without publishing a Soroban event | high |
 | 🟠 warning | [SG-001](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:77` | Exported function `credit` writes contract storage (via `write_balance`) without an authorization check | medium |
 | 🟠 warning | [SG-006](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-006.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:77` | `credit` stores or accounts `amount: i128` without rejecting negative values | medium |
 | 🟠 warning | [SG-001](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md) | `fixtures/vulnerable-examples/missing-auth/src/lib.rs:83` | Exported function `set_token` writes contract storage without an authorization check | medium |

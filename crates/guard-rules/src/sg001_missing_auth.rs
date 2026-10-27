@@ -47,8 +47,6 @@ pub(crate) const PRIVILEGED_WORDS: &[&str] = &[
     "governor",
     "upgrader",
     "pauser",
-    "pause",
-    "paused",
     "guardian",
     "authority",
     "treasury",

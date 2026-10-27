@@ -16,7 +16,6 @@ are listed under **Changed**.
   helpers defined outside the crate.
 - SG-001 reports upgrades, outflows and privileged writes whose only authorization runs on some code
   paths (inside an `if` without `else`, one `match` arm, or a loop body) with medium confidence.
-- SG-001 treats pause-state storage keys as privileged configuration.
 - SG-003 treats `i128` / `u128` function parameters as token amounts regardless of name (medium
   confidence at most).
 - SG-001 reports a balance debit keyed by an address that did not authorize

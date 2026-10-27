@@ -141,6 +141,20 @@
         "account-abstraction"
       ],
       "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-009.md"
+    },
+    {
+      "id": "SG-010",
+      "name": "missing-admin-events",
+      "summary": "Privileged changes do not publish an event",
+      "description": "An exported contract function upgrades the contract or writes a privileged storage key without publishing a Soroban event itself or through a helper it calls. Events make these changes easier for indexers and operators to monitor off-chain.",
+      "remediation": "Publish a descriptive event with `env.events().publish(..)` when the privileged change occurs, directly or through a helper.",
+      "severity": "info",
+      "tags": [
+        "operations",
+        "events",
+        "access-control"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md"
     }
   ]
 }

@@ -9,7 +9,7 @@
     "files_scanned": 1,
     "errors": 0,
     "warnings": 10,
-    "infos": 2,
+    "infos": 4,
     "suppressed": 0,
     "parse_failures": 0
   },
@@ -66,9 +66,9 @@
         "end_line": 67,
         "end_column": 37
       },
-      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007",
+      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010",
       "function": "set_admin",
-      "fingerprint": "a62996ebe61632fb",
+      "fingerprint": "70518ceb04acc919",
       "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
     },
     {
@@ -85,10 +85,29 @@
         "end_line": 67,
         "end_column": 37
       },
-      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007",
+      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010",
       "function": "set_admin",
-      "fingerprint": "c4d6c4283e9d9321",
+      "fingerprint": "7f62d97441b73d97",
       "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md"
+    },
+    {
+      "rule_id": "SG-010",
+      "rule_name": "missing-admin-events",
+      "severity": "info",
+      "confidence": "high",
+      "message": "Exported function `set_admin` modifies privileged configuration without publishing a Soroban event",
+      "help": "Publish an event with `env.events().publish(..)` so off-chain consumers can monitor this change.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 67,
+        "start_column": 34,
+        "end_line": 67,
+        "end_column": 37
+      },
+      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010",
+      "function": "set_admin",
+      "fingerprint": "3b8689dabc1cf3af",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md"
     },
     {
       "rule_id": "SG-001",
@@ -104,10 +123,29 @@
         "end_line": 72,
         "end_column": 52
       },
-      "snippet": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001",
+      "snippet": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010",
       "function": "upgrade",
-      "fingerprint": "bc3b3fa14e7d5ab3",
+      "fingerprint": "626012bcd88b98d1",
       "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-010",
+      "rule_name": "missing-admin-events",
+      "severity": "info",
+      "confidence": "high",
+      "message": "Exported function `upgrade` upgrades the contract without publishing a Soroban event",
+      "help": "Publish an event with `env.events().publish(..)` so off-chain consumers can monitor this change.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 72,
+        "start_column": 24,
+        "end_line": 72,
+        "end_column": 52
+      },
+      "snippet": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010",
+      "function": "upgrade",
+      "fingerprint": "fd15e03c9ad2f3bf",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md"
     },
     {
       "rule_id": "SG-001",
@@ -370,6 +408,20 @@
         "account-abstraction"
       ],
       "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-009.md"
+    },
+    {
+      "id": "SG-010",
+      "name": "missing-admin-events",
+      "summary": "Privileged changes do not publish an event",
+      "description": "An exported contract function upgrades the contract or writes a privileged storage key without publishing a Soroban event itself or through a helper it calls. Events make these changes easier for indexers and operators to monitor off-chain.",
+      "remediation": "Publish a descriptive event with `env.events().publish(..)` when the privileged change occurs, directly or through a helper.",
+      "severity": "info",
+      "tags": [
+        "operations",
+        "events",
+        "access-control"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md"
     }
   ]
 }

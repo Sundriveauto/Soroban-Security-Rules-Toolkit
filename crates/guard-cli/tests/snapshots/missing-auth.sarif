@@ -112,7 +112,7 @@
                   "endColumn": 37,
                   "endLine": 67,
                   "snippet": {
-                    "text": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007"
+                    "text": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010"
                   },
                   "startColumn": 34,
                   "startLine": 67
@@ -124,7 +124,7 @@
             "text": "Exported function `set_admin` modifies privileged configuration without an authorization check. Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`."
           },
           "partialFingerprints": {
-            "stellarGuardFingerprint/v1": "a62996ebe61632fb"
+            "stellarGuardFingerprint/v1": "70518ceb04acc919"
           },
           "properties": {
             "confidence": "high",
@@ -152,7 +152,7 @@
                   "endColumn": 37,
                   "endLine": 67,
                   "snippet": {
-                    "text": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007"
+                    "text": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010"
                   },
                   "startColumn": 34,
                   "startLine": 67
@@ -164,7 +164,7 @@
             "text": "This contract writes instance storage but never extends its TTL; entries will be archived when their TTL expires. Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions."
           },
           "partialFingerprints": {
-            "stellarGuardFingerprint/v1": "c4d6c4283e9d9321"
+            "stellarGuardFingerprint/v1": "7f62d97441b73d97"
           },
           "properties": {
             "confidence": "medium",
@@ -172,6 +172,46 @@
           },
           "ruleId": "SG-007",
           "ruleIndex": 6
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "kind": "function",
+                  "name": "set_admin"
+                }
+              ],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 37,
+                  "endLine": 67,
+                  "snippet": {
+                    "text": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010"
+                  },
+                  "startColumn": 34,
+                  "startLine": 67
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Exported function `set_admin` modifies privileged configuration without publishing a Soroban event. Publish an event with `env.events().publish(..)` so off-chain consumers can monitor this change."
+          },
+          "partialFingerprints": {
+            "stellarGuardFingerprint/v1": "3b8689dabc1cf3af"
+          },
+          "properties": {
+            "confidence": "high",
+            "security-severity": "2.0"
+          },
+          "ruleId": "SG-010",
+          "ruleIndex": 9
         },
         {
           "level": "warning",
@@ -192,7 +232,7 @@
                   "endColumn": 52,
                   "endLine": 72,
                   "snippet": {
-                    "text": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001"
+                    "text": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010"
                   },
                   "startColumn": 24,
                   "startLine": 72
@@ -204,7 +244,7 @@
             "text": "Exported function `upgrade` upgrades the contract WASM without an authorization check. Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`."
           },
           "partialFingerprints": {
-            "stellarGuardFingerprint/v1": "bc3b3fa14e7d5ab3"
+            "stellarGuardFingerprint/v1": "626012bcd88b98d1"
           },
           "properties": {
             "confidence": "high",
@@ -212,6 +252,46 @@
           },
           "ruleId": "SG-001",
           "ruleIndex": 0
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "kind": "function",
+                  "name": "upgrade"
+                }
+              ],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 52,
+                  "endLine": 72,
+                  "snippet": {
+                    "text": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010"
+                  },
+                  "startColumn": 24,
+                  "startLine": 72
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Exported function `upgrade` upgrades the contract without publishing a Soroban event. Publish an event with `env.events().publish(..)` so off-chain consumers can monitor this change."
+          },
+          "partialFingerprints": {
+            "stellarGuardFingerprint/v1": "fd15e03c9ad2f3bf"
+          },
+          "properties": {
+            "confidence": "high",
+            "security-severity": "2.0"
+          },
+          "ruleId": "SG-010",
+          "ruleIndex": 9
         },
         {
           "level": "warning",
@@ -731,6 +811,32 @@
               },
               "shortDescription": {
                 "text": "Custom account `__check_auth` does not verify the signature"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "An exported contract function upgrades the contract or writes a privileged storage key without publishing a Soroban event itself or through a helper it calls. Events make these changes easier for indexers and operators to monitor off-chain."
+              },
+              "help": {
+                "markdown": "Publish a descriptive event with `env.events().publish(..)` when the privileged change occurs, directly or through a helper.\n\n[Rule documentation](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md)",
+                "text": "Publish a descriptive event with `env.events().publish(..)` when the privileged change occurs, directly or through a helper."
+              },
+              "helpUri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md",
+              "id": "SG-010",
+              "name": "missing-admin-events",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "operations",
+                  "events",
+                  "access-control"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privileged changes do not publish an event"
               }
             }
           ],

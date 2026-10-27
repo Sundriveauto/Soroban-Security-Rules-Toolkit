@@ -21,7 +21,7 @@ warning[SG-001]: Exported function `withdraw` transfers tokens out of the contra
 warning[SG-001]: Exported function `set_admin` modifies privileged configuration without an authorization check
   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:67:34
    |
-67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
+67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010
    |                                  ^^^
    |
    = missing-authorization (SG-001), confidence: high, function: `set_admin`
@@ -31,22 +31,42 @@ warning[SG-001]: Exported function `set_admin` modifies privileged configuration
 info[SG-007]: This contract writes instance storage but never extends its TTL; entries will be archived when their TTL expires
   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:67:34
    |
-67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
+67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010
    |                                  ^^^
    |
    = missing-ttl-extension (SG-007), confidence: medium, function: `set_admin`
    = help: Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions.
    = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md
 
+info[SG-010]: Exported function `set_admin` modifies privileged configuration without publishing a Soroban event
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:67:34
+   |
+67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010
+   |                                  ^^^
+   |
+   = missing-admin-events (SG-010), confidence: high, function: `set_admin`
+   = help: Publish an event with `env.events().publish(..)` so off-chain consumers can monitor this change.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md
+
 warning[SG-001]: Exported function `upgrade` upgrades the contract WASM without an authorization check
   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:72:24
    |
-72 |         env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001
+72 |         env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = missing-authorization (SG-001), confidence: high, function: `upgrade`
    = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
    = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+info[SG-010]: Exported function `upgrade` upgrades the contract without publishing a Soroban event
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:72:24
+   |
+72 |         env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = missing-admin-events (SG-010), confidence: high, function: `upgrade`
+   = help: Publish an event with `env.events().publish(..)` so off-chain consumers can monitor this change.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md
 
 warning[SG-001]: Exported function `credit` writes contract storage (via `write_balance`) without an authorization check
   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:77:9
@@ -118,5 +138,5 @@ warning[SG-001]: Exported function `withdraw_signed` calls `require_auth_for_arg
     = help: Include every amount and address that the call acts on in the `require_auth_for_args` arguments, or use `require_auth()` so the full invocation is signed.
     = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
 
-stellar-guard scanned 1 file with 9 rules: 0 errors, 10 warnings, 2 infos
+stellar-guard scanned 1 file with 10 rules: 0 errors, 10 warnings, 4 infos
 note: stellar-guard reports potential issues found by source-level heuristics. Findings are not proof of a vulnerability, and a clean scan does not prove a contract is secure.

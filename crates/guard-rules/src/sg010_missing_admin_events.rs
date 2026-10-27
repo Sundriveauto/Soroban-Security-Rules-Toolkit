@@ -30,7 +30,7 @@ impl Rule for MissingAdminEvents {
     }
 
     fn check(&self, cx: &RuleContext<'_>, out: &mut Vec<Diagnostic>) {
-        let privileged = word_set(PRIVILEGED_WORDS, Vec::new());
+        let privileged = word_set(PRIVILEGED_WORDS, vec!["pause".into(), "paused".into()]);
         let model = cx.model;
 
         for (id, f) in model.fns_in_file(cx.file_idx) {

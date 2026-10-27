@@ -1,2 +1,2 @@
-stellar-guard scanned 5 files with 9 rules: 0 errors, 0 warnings, 0 infos (1 suppressed)
+stellar-guard scanned 5 files with 10 rules: 0 errors, 0 warnings, 0 infos (1 suppressed)
 note: stellar-guard reports potential issues found by source-level heuristics. Findings are not proof of a vulnerability, and a clean scan does not prove a contract is secure.

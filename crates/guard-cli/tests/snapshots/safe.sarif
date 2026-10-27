@@ -251,6 +251,32 @@
               "shortDescription": {
                 "text": "Custom account `__check_auth` does not verify the signature"
               }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "An exported contract function upgrades the contract or writes a privileged storage key without publishing a Soroban event itself or through a helper it calls. Events make these changes easier for indexers and operators to monitor off-chain."
+              },
+              "help": {
+                "markdown": "Publish a descriptive event with `env.events().publish(..)` when the privileged change occurs, directly or through a helper.\n\n[Rule documentation](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md)",
+                "text": "Publish a descriptive event with `env.events().publish(..)` when the privileged change occurs, directly or through a helper."
+              },
+              "helpUri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-010.md",
+              "id": "SG-010",
+              "name": "missing-admin-events",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "operations",
+                  "events",
+                  "access-control"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privileged changes do not publish an event"
+              }
             }
           ],
           "semanticVersion": "<version>",
