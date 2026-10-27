@@ -66,7 +66,7 @@ fn json_output_is_valid_and_deterministic() {
     assert_eq!(v["schema_version"], "1.0");
     assert_eq!(v["tool"]["name"], "stellar-guard");
     let findings = v["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), 59);
+    assert_eq!(findings.len(), 60);
     for f in findings {
         assert!(f["location"]["start_line"].as_u64().unwrap() > 0);
         assert_eq!(f["fingerprint"].as_str().unwrap().len(), 16);
@@ -122,10 +122,11 @@ fn rule_selection() {
     assert!(v["findings"].as_array().unwrap().iter().all(|f| f["rule_id"] == "SG-005"));
     assert_eq!(v["rules"].as_array().unwrap().len(), 1);
 
-    let out = scan(&[p, "--disable", "SG-001,SG-002,SG-003,SG-004,SG-006,SG-007,SG-008,SG-009,SG-010", "-f", "json", "-q"])
-        .get_output()
-        .stdout
-        .clone();
+    let out =
+        scan(&[p, "--disable", "SG-001,SG-002,SG-003,SG-004,SG-006,SG-007,SG-008,SG-009,SG-010", "-f", "json", "-q"])
+            .get_output()
+            .stdout
+            .clone();
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["findings"].as_array().unwrap().len(), 3);
 
@@ -135,19 +136,10 @@ fn rule_selection() {
 #[test]
 fn min_confidence_filter() {
     let p = fixtures("vulnerable-examples/missing-auth");
-    let out = scan(&[
-        p.to_str().unwrap(),
-        "--min-confidence",
-        "high",
-        "--disable",
-        "SG-010",
-        "-f",
-        "json",
-        "-q",
-    ])
-    .get_output()
-    .stdout
-    .clone();
+    let out = scan(&[p.to_str().unwrap(), "--min-confidence", "high", "--disable", "SG-010", "-f", "json", "-q"])
+        .get_output()
+        .stdout
+        .clone();
     let v: Value = serde_json::from_slice(&out).unwrap();
     // `credit` is medium confidence and is filtered out.
     assert_eq!(v["findings"].as_array().unwrap().len(), 3);

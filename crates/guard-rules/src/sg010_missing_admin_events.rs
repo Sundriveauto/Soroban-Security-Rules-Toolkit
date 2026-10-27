@@ -38,9 +38,7 @@ impl Rule for MissingAdminEvents {
                 continue;
             }
 
-            let publishes = model
-                .witness(id, &|_, facts| facts.event_publishes.first().copied())
-                .is_some();
+            let publishes = model.witness(id, &|_, facts| facts.event_publishes.first().copied()).is_some();
             if publishes {
                 continue;
             }
@@ -56,11 +54,7 @@ impl Rule for MissingAdminEvents {
 }
 
 fn privileged_write(facts: &FnFacts, privileged: &[String]) -> Option<Span> {
-    facts
-        .state_writes
-        .iter()
-        .find(|w| w.key_idents.last().is_some_and(|key| has_word(key, privileged)))
-        .map(|w| w.span)
+    facts.state_writes.iter().find(|w| w.key_idents.last().is_some_and(|key| has_word(key, privileged))).map(|w| w.span)
 }
 
 fn missing_event(function: &str, span: Span, operation: &str) -> Diagnostic {
