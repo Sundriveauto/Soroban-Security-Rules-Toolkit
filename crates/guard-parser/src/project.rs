@@ -118,6 +118,10 @@ impl Project {
         }
 
         project.crates = resolver.into_crates();
+        if !opts.include_tests {
+            let crates = &project.crates;
+            project.files.retain(|f| !crates.get(f.crate_id).is_some_and(|c| c.test_support));
+        }
         Ok(project)
     }
 

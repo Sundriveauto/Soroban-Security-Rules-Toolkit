@@ -4,7 +4,14 @@ use guard_engine::{Engine, Finding, Rule, Settings};
 use guard_parser::CrateInfo;
 
 pub fn soroban_crate(overflow_checks: Option<bool>) -> CrateInfo {
-    CrateInfo { root: None, name: Some("test".into()), depends_on_soroban: true, overflow_checks, local_deps: vec![] }
+    CrateInfo {
+        root: None,
+        name: Some("test".into()),
+        depends_on_soroban: true,
+        overflow_checks,
+        local_deps: vec![],
+        test_support: false,
+    }
 }
 
 pub fn run_with(rule: Box<dyn Rule>, src: &str, info: CrateInfo, settings: &Settings) -> Vec<Finding> {

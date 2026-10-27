@@ -280,9 +280,9 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                 let (key_idents, key_is_parameterised) = match op.key() {
                     Some(k) => {
                         let parameterised = match crate::syntax::strip(k) {
-                            Expr::Call(c) => !c.args.is_empty(),
+                            Expr::Call(c) => call_takes_values(c),
                             Expr::Path(_) => self.bindings.resolve(k).is_some_and(
-                                |init| matches!(crate::syntax::strip(init), Expr::Call(c) if !c.args.is_empty()),
+                                |init| matches!(crate::syntax::strip(init), Expr::Call(c) if call_takes_values(c)),
                             ),
                             _ => false,
                         };
@@ -444,4 +444,23 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
 
     // Nested function items are modelled separately.
     fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
+}
+
+/// `true` if a key constructor takes a runtime value (`DataKey::Balance(user)`),
+/// not only fixed ones: `Symbol::new(&e, ADMIN_KEY)` names a single key.
+fn call_takes_values(c: &syn::ExprCall) -> bool {
+    fn fixed(e: &Expr) -> bool {
+        match crate::syntax::strip(e) {
+            Expr::Lit(_) => true,
+            Expr::Path(p) if p.qself.is_none() => {
+                let last = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                let is_const = last.len() > 1
+                    && last.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+                is_const || (p.path.segments.len() == 1 && matches!(last.as_str(), "e" | "env" | "_env"))
+            }
+            Expr::MethodCall(m) if m.method == "clone" => fixed(&m.receiver),
+            _ => false,
+        }
+    }
+    c.args.iter().any(|a| !fixed(a))
 }

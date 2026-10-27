@@ -233,3 +233,19 @@ fn color_flag() {
     scan(&[p.to_str().unwrap(), "--color", "always"]).stdout(predicate::str::contains("\x1b["));
     scan(&[p.to_str().unwrap(), "--color", "never"]).stdout(predicate::str::contains("\x1b[").not());
 }
+
+#[test]
+fn test_support_crates_are_skipped_unless_tests_are_included() {
+    let d = tempfile::tempdir().unwrap();
+    let suite = d.path().join("suite");
+    fs::create_dir_all(suite.join("src")).unwrap();
+    fs::write(
+        suite.join("Cargo.toml"),
+        "[package]\nname = \"suite\"\n[dependencies]\nsoroban-sdk = { version = \"22\", features = [\"testutils\"] }\n",
+    )
+    .unwrap();
+    fs::copy(fixtures("vulnerable-examples/missing-auth/src/lib.rs"), suite.join("src/lib.rs")).unwrap();
+    let p = suite.to_str().unwrap();
+    scan(&[p]).code(2).stderr(predicate::str::contains("--include-tests"));
+    scan(&[p, "--include-tests"]).code(1).stdout(predicate::str::contains("warning[SG-001]"));
+}

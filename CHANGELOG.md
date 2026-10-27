@@ -29,6 +29,11 @@ are listed under **Changed**.
 - SG-004 recognises length caps checked in helpers or where the storage key is written, under any
   variable name (4 fewer false positives on OpenZeppelin stellar-contracts).
 - SG-005 reports initializer guards on a key the initializer never writes.
+- Test-support crates (a regular dependency enables `testutils`, which cannot build for wasm) are
+  excluded like other test code unless `--include-tests` is given.
+- SG-002 treats keys built only from constants (`Symbol::new(e, ADMIN_KEY)`) as single keys, not
+  per-user keys. SG-003 no longer treats enum variants cast to integers as token amounts. On the
+  audited Blend v2 code this removes 24 of 33 warnings.
 - SG-004 traces where a collection's length comes from: lists built element-wise from parameters or
   returned by cross-contract calls are no longer treated as storage-backed, `len() == MAX` counts as
   a cap, and lists derived from a capped stored list inherit the cap (OpenZeppelin stellar-contracts:

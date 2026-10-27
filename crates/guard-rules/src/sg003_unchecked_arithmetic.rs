@@ -186,6 +186,13 @@ impl ArithVisitor<'_> {
         if is_literal(e) {
             return None;
         }
+        // `RequestType::Supply as u32`: an enum variant (UpperCamelCase path) is never an amount.
+        if let Expr::Path(p) = guard_parser::syntax::strip(e) {
+            if p.path.segments.last().is_some_and(|s| s.ident.to_string().starts_with(|c: char| c.is_ascii_uppercase()))
+            {
+                return None;
+            }
+        }
         let name = operand_name(e)?;
         if is_constant_name(&name) {
             return None;
@@ -404,6 +411,12 @@ fn total(s: &mut State, amount: i128) { s.total_supply += amount; }
         let f = check("fn x(amount: i128) -> u64 { let a = amount as u64; let b = amount as i128; a }");
         assert_eq!(f.len(), 1);
         assert!(f[0].message.contains("as u64"));
+    }
+
+    #[test]
+    fn enum_variant_casts_are_not_amounts() {
+        let f = check("fn x(t: u32) -> bool { t == RequestType::SupplyCollateral as u32 || t == Supply as u32 }");
+        assert!(f.is_empty(), "{f:#?}");
     }
 
     #[test]

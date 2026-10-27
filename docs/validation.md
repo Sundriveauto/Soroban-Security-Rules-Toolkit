@@ -6,12 +6,13 @@ This page records the results so precision regressions are visible.
 
 | Repository | Commit | Files | error | warning | info |
 |---|---|---|---|---|---|
-| [stellar/soroban-examples](https://github.com/stellar/soroban-examples) | `03d42aa` (2026-10-06) | 109 | 0 | 3 | 59 |
+| [stellar/soroban-examples](https://github.com/stellar/soroban-examples) | `03d42aa` (2026-10-06) | 106 | 0 | 3 | 59 |
 | [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 0 | 16 | 35 |
+| [code-423n4/2025-02-blend](https://github.com/code-423n4/2025-02-blend) (Blend v2, audited code) | `f23b326` (2025-02-24) | 67 | 0 | 9 | 62 |
 
 Command: `stellar-guard scan <repo> --no-config` (defaults: tests excluded, all rules).
-soroban-examples counts 109 files since `#![cfg(test)]` files and cargo-fuzz targets are excluded
-as test code.
+Test code is excluded: `#![cfg(test)]` files, cargo-fuzz targets, and test-support crates (a regular
+dependency enables `testutils`, e.g. Blend's `test-suites` and mock contracts).
 
 ## soroban-examples, per rule
 
@@ -40,6 +41,32 @@ as test code.
 | SG-007 | 0 | 4 | Example contracts (`ownable`, `pausable`, …) that never extend instance TTL. |
 | SG-008 | 2 | 0 | `smart_account` deliberately ignores `try_uninstall` of an untrusted policy; a "review and suppress" case. |
 | SG-009 | 0 | 0 | |
+
+## Blend v2 against its public audit
+
+[Blend v2](https://github.com/code-423n4/2025-02-blend) was audited in a
+[Code4rena contest](https://code4rena.com/reports/2025-02-blend-v2-audit-certora-formal-verification)
+(3 high, 18 medium findings). Scanning the contest commit shows what a pattern-based tool can and
+cannot be expected to find.
+
+| Rule | warning | info | Notes |
+|---|---|---|---|
+| SG-001 | 6 | 3 | Permissionless by design (`gulp`, `bad_debt`, `new_auction`, reward-zone updates, `set_reserve` after an admin-queued timelock). Several act on another user's positions, so they are worth a reviewer's look and a suppression with the reason. |
+| SG-003 | 3 | 58 | warning: `request.amount as u64` (an `i128` fill percentage truncated to `u64`; a value above `u64::MAX` wraps). info: arithmetic in a crate with `overflow-checks = true`. |
+| SG-006 | 0 | 1 | Admin-only `min_collateral`. |
+
+**Audit findings detected: 0 / 21.** All of them are protocol-economics bugs: stale reserve state after
+a flash loan (H-01), emissions accounting (H-02, M-05 – M-08, M-12, M-16), utilization limits
+(H-03, M-02, M-14), auction pricing and lifecycle (M-03, M-04, M-09, M-17, M-18), fixed-point
+rounding to zero (M-10), fee and interest ordering (M-11, M-13, M-15), and a missing
+`require_action_allowed` on flash loans (M-01). None is a missing `require_auth`, a storage-tier,
+TTL, initialization or `__check_auth` mistake, which is what the rules target. stellar-guard does
+not replace an audit of a protocol's economic logic.
+
+Running Blend through the scanner removed 24 false-positive warnings (33 → 9): constant
+`Symbol::new(e, KEY)` storage keys were treated as per-user keys (SG-002), enum discriminant casts
+(`RequestType::Supply as u32`) as token amounts (SG-003), and `test-suites` / mock crates as
+contract code.
 
 ## Recall on seeded bugs
 
@@ -89,5 +116,9 @@ python3 scripts/seeded_bugs.py <soroban-examples checkout at 03d42aa> target/rel
 * SG-009 accepts accounts that delegate authorization (`delegate_auth`, `require_auth`) without
   reading the payload.
 * `#![cfg(test)]` files and cargo-fuzz `fuzz_targets/` are excluded as test code.
+* Crates that enable `testutils` in regular dependencies are excluded as test code (Blend).
+* Keys built only from constants (`Symbol::new(e, ADMIN_KEY)`) are single keys (−14 SG-002 on Blend).
+* Enum variants cast to integers are not token amounts (−9 SG-003 on Blend).
+* SG-004 traces where a collection's length comes from (−7 on OpenZeppelin).
 
 To reproduce, clone the repositories at the listed commits and run the command above.

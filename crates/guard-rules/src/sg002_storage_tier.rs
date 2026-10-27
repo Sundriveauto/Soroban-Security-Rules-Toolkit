@@ -300,6 +300,17 @@ fn config(e: &Env, fee: u32) {
     }
 
     #[test]
+    fn keys_built_from_constants_are_single_keys() {
+        let f = check(
+            "const ADMIN_KEY: &str = \"Admin\"; fn w(e: &Env, a: Address) { \
+             e.storage().instance().set(&Symbol::new(e, ADMIN_KEY), &a); \
+             e.storage().instance().set(&Symbol::new(&e, \"Meta\"), &1u32); \
+             let k = Symbol::new(e, POOL_KEY); e.storage().instance().set(&k, &a); }",
+        );
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    #[test]
     fn key_arguments_do_not_count_as_key_names() {
         let f = check(
             "fn w(e: &Env, config: Config, m: Address) { \

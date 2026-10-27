@@ -15,7 +15,7 @@ use crate::suppress::Suppressions;
 pub enum EngineError {
     #[error(transparent)]
     Load(#[from] LoadError),
-    #[error("no Rust source files found in {0}")]
+    #[error("no Rust source files found in {0} (test code is skipped unless --include-tests is given)")]
     NoSources(String),
     #[error("unknown rule `{0}` (run `stellar-guard rules` to list rules)")]
     UnknownRule(String),

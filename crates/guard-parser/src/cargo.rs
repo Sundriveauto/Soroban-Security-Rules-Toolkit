@@ -21,6 +21,10 @@ pub struct CrateInfo {
     /// Names of local dependencies (`path = ".."` or `workspace = true`), with `-`
     /// replaced by `_`. Helpers in these crates are followed when resolving calls.
     pub local_deps: Vec<String>,
+    /// `true` for test-support crates: a regular (non-dev) dependency enables a
+    /// `testutils` feature, which `soroban-sdk` rejects on wasm, so the crate is
+    /// never deployed (integration test suites, mock contracts built for tests).
+    pub test_support: bool,
 }
 
 impl CrateInfo {
@@ -132,6 +136,24 @@ fn has_soroban_dep(table: &toml::Table) -> bool {
     direct || target_specific
 }
 
+fn enables_testutils(table: &toml::Table) -> bool {
+    let in_deps = |t: &toml::Table| {
+        t.get("dependencies").and_then(|d| d.as_table()).is_some_and(|deps| {
+            deps.values().any(|spec| {
+                spec.as_table()
+                    .and_then(|s| s.get("features"))
+                    .and_then(|f| f.as_array())
+                    .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("testutils")))
+            })
+        })
+    };
+    in_deps(table)
+        || table
+            .get("target")
+            .and_then(|t| t.as_table())
+            .is_some_and(|targets| targets.values().any(|cfg| cfg.as_table().is_some_and(in_deps)))
+}
+
 fn release_overflow_checks(table: &toml::Table) -> Option<bool> {
     table.get("profile")?.as_table()?.get("release")?.as_table()?.get("overflow-checks")?.as_bool()
 }
@@ -187,6 +209,7 @@ pub fn load_crate_info(dir: &Path) -> CrateInfo {
         depends_on_soroban: has_soroban_dep(&manifest),
         overflow_checks,
         local_deps: local_deps(&manifest),
+        test_support: enables_testutils(&manifest),
     }
 }
 
@@ -212,6 +235,28 @@ mod tests {
         assert_eq!(info.name.as_deref(), Some("c"));
         assert!(info.depends_on_soroban);
         assert_eq!(info.overflow_checks, Some(true));
+    }
+
+    #[test]
+    fn testutils_in_regular_dependencies_marks_a_test_support_crate() {
+        let d = tempfile::tempdir().unwrap();
+        let cases = [
+            ("suite", "[dependencies]\nsoroban-sdk = { workspace = true, features = [\"testutils\"] }\n", true),
+            ("mock", "[dependencies]\npool = { path = \"../pool\", features = [\"testutils\"] }\n", true),
+            (
+                "contract",
+                "[dependencies]\nsoroban-sdk = \"22\"\n[dev-dependencies]\nsoroban-sdk = { version = \"22\", features = [\"testutils\"] }\n\
+[features]\ntestutils = [\"soroban-sdk/testutils\"]\n",
+                false,
+            ),
+        ];
+        for (name, deps, expected) in cases {
+            write(d.path(), &format!("{name}/Cargo.toml"), &format!("[package]\nname=\"{name}\"\n{deps}"));
+            write(d.path(), &format!("{name}/src/lib.rs"), "");
+            let mut r = CrateResolver::new();
+            let idx = r.crate_for(&d.path().join(format!("{name}/src/lib.rs")));
+            assert_eq!(r.into_crates()[idx].test_support, expected, "{name}");
+        }
     }
 
     #[test]
