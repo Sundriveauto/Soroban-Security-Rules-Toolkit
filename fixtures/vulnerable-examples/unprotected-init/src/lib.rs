@@ -21,7 +21,7 @@ pub struct Pool;
 #[contractimpl]
 impl Pool {
     pub fn initialize(env: Env, admin: Address, token: Address, fee_bps: u32) { // expect: SG-005
-        write_admin(&env, &admin);
+        write_admin(&env, &admin); // expect: SG-010
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
     }
@@ -31,7 +31,7 @@ impl Pool {
         if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
-        write_admin(&env, &admin);
+        write_admin(&env, &admin); // expect: SG-010
     }
 
     pub fn set_fee(env: Env, fee_bps: u32) {

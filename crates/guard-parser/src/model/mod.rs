@@ -214,6 +214,8 @@ pub struct FnFacts {
     pub outflows: Vec<Span>,
     /// Contract upgrades: `update_current_contract_wasm` and `update_current_contract`.
     pub upgrades: Vec<Span>,
+    /// Soroban event publications: `env.events().publish(..)`.
+    pub event_publishes: Vec<Span>,
     /// TTL extensions by tier: `storage().<tier>().extend_ttl(..)`; the deployer's
     /// `extend_ttl_for_contract_instance` / `extend_ttl` count as instance.
     pub ttl_extends: Vec<Option<StorageTier>>,

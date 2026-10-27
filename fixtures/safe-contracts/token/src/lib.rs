@@ -87,6 +87,7 @@ impl Token {
         let admin = read_administrator(&e);
         admin.require_auth();
         write_administrator(&e, &new_admin);
+        e.events().publish((soroban_sdk::symbol_short!("admin"),), new_admin);
     }
 
     pub fn allowance(e: Env, from: Address, spender: Address) -> i128 {

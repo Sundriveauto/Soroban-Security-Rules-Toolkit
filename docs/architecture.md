@@ -4,7 +4,7 @@ stellar-guard is a Cargo workspace of five crates with a strict one-way dependen
 
 ```mermaid
 flowchart LR
-    CLI["guard-cli<br/>stellar-guard binary"] --> RULES["guard-rules<br/>SG-001 … SG-009"]
+    CLI["guard-cli<br/>stellar-guard binary"] --> RULES["guard-rules<br/>SG-001 … SG-010"]
     CLI --> REP["guard-reporters<br/>text, json, sarif, github, markdown"]
     CLI --> ENG
     RULES --> ENG["guard-engine<br/>Rule trait, config, suppressions, findings"]
@@ -46,7 +46,7 @@ flowchart TD
 * `model` — a `CrateModel` per crate: every function (`ContractExport`, `Method`, `Free`, trait
   default methods) with its module path, plus `FnFacts` (auth checks and their subjects, whether
   they run on every path, storage reads/writes with tier, key and value, outflow transfers, WASM
-  upgrades, init guards, call sites with their arguments). Functions of local dependency crates are
+  upgrades, event publications, init guards, call sites with their arguments). Functions of local dependency crates are
   included (marked `foreign`) so calls into a shared library crate resolve; each crate's facts are
   computed once per scan. Queries over helpers:
   * `witness()` — "does this export, or anything it calls, write storage?", returning the call site

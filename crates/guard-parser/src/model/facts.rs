@@ -254,6 +254,14 @@ impl<'ast> Visit<'ast> for FactsVisitor<'_, '_> {
                 }
             }
             "update_current_contract_wasm" | "update_current_contract" => self.facts.upgrades.push(span),
+            "publish"
+                if matches!(
+                    crate::syntax::strip(&m.receiver),
+                    Expr::MethodCall(events) if events.method == "events"
+                ) =>
+            {
+                self.facts.event_publishes.push(span);
+            }
             "extend_ttl_for_contract_instance" | "extend_ttl_for_code" => {
                 self.facts.ttl_extends.push(Some(StorageTier::Instance));
                 self.facts.ttl_extend_keys.push(None);
