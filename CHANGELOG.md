@@ -29,6 +29,10 @@ are listed under **Changed**.
 - SG-004 recognises length caps checked in helpers or where the storage key is written, under any
   variable name (4 fewer false positives on OpenZeppelin stellar-contracts).
 - SG-005 reports initializer guards on a key the initializer never writes.
+- SG-001 reports a storage write without authorization as a high-confidence warning when the
+  function's comment says it is admin- or owner-only, and as a medium-confidence warning when the
+  contract's other setters all authorize (previously both were low-confidence `info`). This turns
+  Reflector V3's high-severity Code4rena finding (invocation costs settable by anyone) into a warning.
 - Test-support crates (a regular dependency enables `testutils`, which cannot build for wasm) are
   excluded like other test code unless `--include-tests` is given.
 - SG-002 treats keys built only from constants (`Symbol::new(e, ADMIN_KEY)`) as single keys, not

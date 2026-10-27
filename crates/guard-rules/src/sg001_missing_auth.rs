@@ -124,6 +124,25 @@ impl Rule for MissingAuthorization {
                 Sensitive::Write => ("writes contract storage", Confidence::Low),
             };
             let partial = auth == AuthStatus::Sometimes;
+            // A plain write is far more suspicious when the function's own comment says it is
+            // admin-only, or when the contract's other setters all check authorization.
+            let mut context = String::new();
+            if matches!(kind, Sensitive::Write) && !partial {
+                if documents_auth(&cx.file.text, f.name_span.start.line) {
+                    confidence = Confidence::High;
+                    context = "; its comment says it requires authorization".into();
+                } else if !f.takes_address() {
+                    let guarded = guarded_siblings(model, id, f);
+                    if guarded >= 2 {
+                        // Some contracts mix admin setters with deliberately public updates
+                        // (`gulp`, `update_status`), so this alone is not high confidence.
+                        confidence = Confidence::Medium;
+                        let ty = f.self_ty.as_deref().unwrap_or("the contract");
+                        context =
+                            format!(", unlike {guarded} other state-changing functions of `{ty}` that require it");
+                    }
+                }
+            }
             let mut witness = witness;
             let mut what = what;
             if partial {
@@ -148,7 +167,7 @@ impl Rule for MissingAuthorization {
                     f.name
                 )
             } else {
-                format!("Exported function `{}` {what}{via} without an authorization check", f.name)
+                format!("Exported function `{}` {what}{via} without an authorization check{context}", f.name)
             };
             let mut d = Diagnostic::new(witness.span, message, confidence).in_function(&f.name);
             if confidence == Confidence::Low {
@@ -159,6 +178,65 @@ impl Rule for MissingAuthorization {
             out.push(d);
         }
     }
+}
+
+/// Comment phrases stating that a function is restricted to a privileged caller.
+const AUTH_PHRASES: &[&str] = &[
+    "requires admin",
+    "require admin",
+    "admin authorization",
+    "admin auth",
+    "admin only",
+    "admin-only",
+    "only admin",
+    "only the admin",
+    "only owner",
+    "only the owner",
+    "owner only",
+    "owner-only",
+    "requires owner",
+    "must be called by the admin",
+    "must be called by the owner",
+    "callable only by",
+    "can only be called by",
+];
+
+/// `true` if the comments directly above the function on line `fn_line`
+/// (`//` or `///`, skipping attributes) say it requires a privileged caller.
+fn documents_auth(text: &str, fn_line: usize) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut comment = String::new();
+    let mut i = fn_line.saturating_sub(1);
+    while i > 0 {
+        i -= 1;
+        let l = lines.get(i).map(|l| l.trim()).unwrap_or("");
+        if l.starts_with("#[") || l.is_empty() && comment.is_empty() {
+            continue;
+        }
+        let Some(c) = l.strip_prefix("//") else { break };
+        comment.push(' ');
+        comment.push_str(&c.trim_start_matches(['/', '!']).to_lowercase());
+    }
+    AUTH_PHRASES.iter().any(|p| comment.contains(p))
+}
+
+/// Number of other exported functions of the same contract type that write
+/// state, take no address and always authorize: admin-style setters.
+fn guarded_siblings(model: &guard_parser::CrateModel<'_>, id: usize, f: &guard_parser::FnDef<'_>) -> usize {
+    let Some(ty) = &f.self_ty else { return 0 };
+    model
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|&(other, g)| {
+            other != id
+                && g.is_contract_export()
+                && g.self_ty.as_ref() == Some(ty)
+                && !g.takes_address()
+                && model.auth_status(other) == AuthStatus::Always
+                && model.witness(other, &|_, facts| facts.state_writes.first().map(|w| w.span)).is_some()
+        })
+        .count()
 }
 
 /// Reports a balance debit keyed by an address parameter that never authorizes,
@@ -257,6 +335,49 @@ mod tests {
 
     fn check(src: &str) -> Vec<guard_engine::Finding> {
         run(Box::new(MissingAuthorization), src)
+    }
+
+    #[test]
+    fn documented_admin_only_setter_without_auth_is_high_confidence() {
+        let f = check(
+            r#"
+fn set_costs(e: &Env, c: &Vec<u64>) { e.storage().instance().set(&COST_KEY, c); }
+#[contractimpl]
+impl Oracle {
+    // Update costs configuration
+    // Requires admin authorization
+    pub fn set_costs_config(e: &Env, config: Vec<u64>) {
+        set_costs(e, &config);
+    }
+    /// Public counter.
+    pub fn bump(e: &Env) { e.storage().instance().set(&COUNT, &1u32); }
+}
+"#,
+        );
+        assert_eq!(f.len(), 2, "{f:#?}");
+        assert_eq!(f[0].confidence, Confidence::High);
+        assert_eq!(f[0].severity, Severity::Warning);
+        assert!(f[0].message.contains("comment says"));
+        assert_eq!(f[1].severity, Severity::Info, "plain public write stays info");
+    }
+
+    #[test]
+    fn setter_without_the_auth_its_siblings_have_is_a_warning() {
+        let f = check(
+            r#"
+fn admin_check(e: &Env) { let a: Address = e.storage().instance().get(&ADMIN).unwrap(); a.require_auth(); }
+#[contractimpl]
+impl Oracle {
+    pub fn set_cache_size(e: &Env, n: u32) { admin_check(e); e.storage().instance().set(&CACHE, &n); }
+    pub fn set_period(e: &Env, p: u64) { admin_check(e); e.storage().instance().set(&PERIOD, &p); }
+    pub fn set_costs(e: &Env, c: Vec<u64>) { e.storage().instance().set(&COSTS, &c); }
+}
+"#,
+        );
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].confidence, Confidence::Medium);
+        assert_eq!(f[0].severity, Severity::Warning);
+        assert!(f[0].message.contains("unlike 2 other"), "{}", f[0].message);
     }
 
     // ---- true positives -------------------------------------------------

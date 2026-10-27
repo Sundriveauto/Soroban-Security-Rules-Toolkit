@@ -8,7 +8,8 @@ This page records the results so precision regressions are visible.
 |---|---|---|---|---|---|
 | [stellar/soroban-examples](https://github.com/stellar/soroban-examples) | `03d42aa` (2026-10-06) | 106 | 0 | 3 | 59 |
 | [OpenZeppelin/stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) | `ddc327e` (2026-10-20) | 257 | 0 | 16 | 35 |
-| [code-423n4/2025-02-blend](https://github.com/code-423n4/2025-02-blend) (Blend v2, audited code) | `f23b326` (2025-02-24) | 67 | 0 | 9 | 62 |
+| [code-423n4/2025-02-blend](https://github.com/code-423n4/2025-02-blend) (Blend v2, audited code) | `f23b326` (2025-02-24) | 67 | 0 | 11 | 60 |
+| [code-423n4/2025-10-reflector](https://github.com/code-423n4/2025-10-reflector) (Reflector V3, audited code) | `21676f3` | 15 | 0 | 1 | 4 |
 
 Command: `stellar-guard scan <repo> --no-config` (defaults: tests excluded, all rules).
 Test code is excluded: `#![cfg(test)]` files, cargo-fuzz targets, and test-support crates (a regular
@@ -51,7 +52,7 @@ cannot be expected to find.
 
 | Rule | warning | info | Notes |
 |---|---|---|---|
-| SG-001 | 6 | 3 | Permissionless by design (`gulp`, `bad_debt`, `new_auction`, reward-zone updates, `set_reserve` after an admin-queued timelock). Several act on another user's positions, so they are worth a reviewer's look and a suppression with the reason. |
+| SG-001 | 8 | 1 | Permissionless by design (`gulp`, `bad_debt`, `new_auction`, reward-zone updates, `set_reserve` after an admin-queued timelock). Several act on another user's positions, so they are worth a reviewer's look and a suppression with the reason. `update_status` and `gulp_emissions` are reported because the pool's other setters all authorize (`gulp_emissions` is the entry point of M-12, though the fix there was a minimum delay, not authorization). |
 | SG-003 | 3 | 58 | warning: `request.amount as u64` (an `i128` fill percentage truncated to `u64`; a value above `u64::MAX` wraps). info: arithmetic in a crate with `overflow-checks = true`. |
 | SG-006 | 0 | 1 | Admin-only `min_collateral`. |
 
@@ -67,6 +68,21 @@ Running Blend through the scanner removed 24 false-positive warnings (33 → 9):
 `Symbol::new(e, KEY)` storage keys were treated as per-user keys (SG-002), enum discriminant casts
 (`RequestType::Supply as u32`) as token amounts (SG-003), and `test-suites` / mock crates as
 contract code.
+
+## Reflector V3 against its public audit
+
+Reflector V3 was audited in a Code4rena contest in October 2025. One high-severity finding is an
+access-control gap: `set_invocation_costs_config` in `beam-contract` is documented as
+"Requires admin authorization" but never checks it, so anyone can change invocation costs. Every
+sibling setter (`set_cache_size`, `set_fee_config`, `add_assets`, …) calls `panic_if_not_admin`.
+
+| Version | Result |
+|---|---|
+| before this change | `info` (low confidence): a plain storage write without an `Address` parameter |
+| now | **`warning`, high confidence**: "… without an authorization check; its comment says it requires authorization" |
+
+The scan reports nothing else as a warning. The pattern is covered by the
+[`forgotten-admin-check`](../fixtures/vulnerable-examples/forgotten-admin-check) fixture.
 
 ## Recall on seeded bugs
 
