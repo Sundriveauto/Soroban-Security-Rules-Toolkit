@@ -21,8 +21,10 @@ Files that fail to parse do **not** change the exit code; they are listed in the
 
 ## JSON (`--format json`)
 
-Schema version `1.0`. Fields are only added in minor versions; a breaking change bumps
-`schema_version`.
+Schema version `1.0`, described by the JSON Schema [`report.schema.json`](report.schema.json)
+(`$id`: `https://raw.githubusercontent.com/petermuazu/Soroban-Security-Rules-Toolkit/main/docs/report.schema.json`).
+Fields are only added in minor versions, so ignore properties you do not know; a breaking change
+bumps the major `schema_version`. A test checks every report against the schema.
 
 ```json
 {

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/petermuazu/Soroban-Security-Rules-Toolkit/main/docs/report.schema.json",
+  "title": "stellar-guard JSON report",
+  "description": "Output of `stellar-guard scan --format json`, schema version 1.x. Minor versions only add fields, so consumers must ignore unknown properties; a breaking change bumps the major schema_version.",
+  "type": "object",
+  "required": ["schema_version", "disclaimer", "tool", "summary", "findings", "parse_failures", "rules"],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "disclaimer": { "type": "string" },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "stellar-guard" },
+        "version": { "type": "string" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["files_scanned", "errors", "warnings", "infos", "suppressed", "parse_failures"],
+      "properties": {
+        "files_scanned": { "$ref": "#/$defs/count" },
+        "errors": { "$ref": "#/$defs/count" },
+        "warnings": { "$ref": "#/$defs/count" },
+        "infos": { "$ref": "#/$defs/count" },
+        "suppressed": { "$ref": "#/$defs/count", "description": "Findings hidden by inline suppressions or baselines." },
+        "parse_failures": { "$ref": "#/$defs/count" }
+      }
+    },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "parse_failures": { "type": "array", "items": { "$ref": "#/$defs/parse_failure" } },
+    "rules": {
+      "description": "Metadata of every rule that ran.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "position": { "type": "integer", "minimum": 1 },
+    "severity": { "enum": ["info", "warning", "error"] },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "rule_id": { "type": "string", "pattern": "^SG-[0-9]{3}$" },
+    "finding": {
+      "type": "object",
+      "required": [
+        "rule_id",
+        "rule_name",
+        "severity",
+        "confidence",
+        "message",
+        "help",
+        "location",
+        "snippet",
+        "function",
+        "fingerprint",
+        "help_uri"
+      ],
+      "properties": {
+        "rule_id": { "$ref": "#/$defs/rule_id" },
+        "rule_name": { "type": "string" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "message": { "type": "string" },
+        "help": { "type": "string" },
+        "location": {
+          "type": "object",
+          "required": ["file", "start_line", "start_column", "end_line", "end_column"],
+          "properties": {
+            "file": { "type": "string", "description": "Path as given on the command line, with `/` separators." },
+            "start_line": { "$ref": "#/$defs/position" },
+            "start_column": { "$ref": "#/$defs/position" },
+            "end_line": { "$ref": "#/$defs/position" },
+            "end_column": { "$ref": "#/$defs/position" }
+          }
+        },
+        "snippet": { "type": "string", "description": "The source line the finding starts on." },
+        "function": { "type": ["string", "null"], "description": "Enclosing function, when known." },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "Stable across runs and unrelated edits; used by baselines."
+        },
+        "help_uri": { "type": "string" }
+      }
+    },
+    "parse_failure": {
+      "type": "object",
+      "required": ["file", "line", "column", "message"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "column": { "type": ["integer", "null"], "minimum": 0 },
+        "message": { "type": "string" }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["id", "name", "summary", "description", "remediation", "severity", "tags", "help_uri"],
+      "properties": {
+        "id": { "$ref": "#/$defs/rule_id" },
+        "name": { "type": "string" },
+        "summary": { "type": "string" },
+        "description": { "type": "string" },
+        "remediation": { "type": "string" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "help_uri": { "type": "string" }
+      }
+    }
+  }
+}
