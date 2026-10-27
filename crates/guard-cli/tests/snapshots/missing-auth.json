@@ -1,0 +1,375 @@
+{
+  "schema_version": "1.0",
+  "disclaimer": "stellar-guard reports potential issues found by source-level heuristics. Findings are not proof of a vulnerability, and a clean scan does not prove a contract is secure.",
+  "tool": {
+    "name": "stellar-guard",
+    "version": "<version>"
+  },
+  "summary": {
+    "files_scanned": 1,
+    "errors": 0,
+    "warnings": 10,
+    "infos": 2,
+    "suppressed": 0,
+    "parse_failures": 0
+  },
+  "findings": [
+    {
+      "rule_id": "SG-007",
+      "rule_name": "missing-ttl-extension",
+      "severity": "info",
+      "confidence": "medium",
+      "message": "This contract writes persistent storage but never extends its TTL; entries will be archived when their TTL expires",
+      "help": "Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 33,
+        "start_column": 10,
+        "end_line": 33,
+        "end_column": 13
+      },
+      "snippet": "        .set(&DataKey::Balance(user.clone()), &amount); // expect: SG-007",
+      "function": "write_balance",
+      "fingerprint": "a18f460896d58009",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "high",
+      "message": "Exported function `withdraw` transfers tokens out of the contract without an authorization check",
+      "help": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 62,
+        "start_column": 16,
+        "end_line": 62,
+        "end_column": 24
+      },
+      "snippet": "        client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001",
+      "function": "withdraw",
+      "fingerprint": "bdf77882c966aa8e",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "high",
+      "message": "Exported function `set_admin` modifies privileged configuration without an authorization check",
+      "help": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 67,
+        "start_column": 34,
+        "end_line": 67,
+        "end_column": 37
+      },
+      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007",
+      "function": "set_admin",
+      "fingerprint": "a62996ebe61632fb",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-007",
+      "rule_name": "missing-ttl-extension",
+      "severity": "info",
+      "confidence": "medium",
+      "message": "This contract writes instance storage but never extends its TTL; entries will be archived when their TTL expires",
+      "help": "Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 67,
+        "start_column": 34,
+        "end_line": 67,
+        "end_column": 37
+      },
+      "snippet": "        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007",
+      "function": "set_admin",
+      "fingerprint": "c4d6c4283e9d9321",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "high",
+      "message": "Exported function `upgrade` upgrades the contract WASM without an authorization check",
+      "help": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 72,
+        "start_column": 24,
+        "end_line": 72,
+        "end_column": 52
+      },
+      "snippet": "        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001",
+      "function": "upgrade",
+      "fingerprint": "bc3b3fa14e7d5ab3",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "Exported function `credit` writes contract storage (via `write_balance`) without an authorization check",
+      "help": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 77,
+        "start_column": 9,
+        "end_line": 77,
+        "end_column": 22
+      },
+      "snippet": "        write_balance(&env, &user, amount); // expect: SG-001, SG-006",
+      "function": "credit",
+      "fingerprint": "613a81421507732a",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-006",
+      "rule_name": "negative-amount",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "`credit` stores or accounts `amount: i128` without rejecting negative values",
+      "help": "Add `if amount <= 0 { panic_with_error!(..) }` (or `< 0` if zero is allowed) before using it.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 77,
+        "start_column": 9,
+        "end_line": 77,
+        "end_column": 22
+      },
+      "snippet": "        write_balance(&env, &user, amount); // expect: SG-001, SG-006",
+      "function": "credit",
+      "fingerprint": "dd23c6e242b87b21",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-006.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "Exported function `set_token` writes contract storage without an authorization check",
+      "help": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 83,
+        "start_column": 34,
+        "end_line": 83,
+        "end_column": 37
+      },
+      "snippet": "        env.storage().instance().set(&DataKey::Token, &token); // expect: SG-001",
+      "function": "set_token",
+      "fingerprint": "c721252b44c1df80",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "Exported function `withdraw_to` transfers tokens out of the contract, but authorizes only on some code paths (inside a branch, loop or closure)",
+      "help": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 92,
+        "start_column": 16,
+        "end_line": 92,
+        "end_column": 24
+      },
+      "snippet": "        client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001",
+      "function": "withdraw_to",
+      "fingerprint": "6bd12f9056f52b42",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "Exported function `move_balance` decreases a value keyed by `from`, but only `caller` authorizes",
+      "help": "Call `from.require_auth()` before debiting it, or check an allowance granted by `from` to the caller.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 102,
+        "start_column": 9,
+        "end_line": 102,
+        "end_column": 22
+      },
+      "snippet": "        write_balance(&env, &from, balance - amount); // expect: SG-001, SG-006",
+      "function": "move_balance",
+      "fingerprint": "15f772b7b1c7d56d",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "rule_id": "SG-006",
+      "rule_name": "negative-amount",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "`move_balance` stores or accounts `amount: i128` without rejecting negative values",
+      "help": "Add `if amount <= 0 { panic_with_error!(..) }` (or `< 0` if zero is allowed) before using it.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 102,
+        "start_column": 9,
+        "end_line": 102,
+        "end_column": 22
+      },
+      "snippet": "        write_balance(&env, &from, balance - amount); // expect: SG-001, SG-006",
+      "function": "move_balance",
+      "fingerprint": "6e309b30e0851ab6",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-006.md"
+    },
+    {
+      "rule_id": "SG-001",
+      "rule_name": "missing-authorization",
+      "severity": "warning",
+      "confidence": "medium",
+      "message": "Exported function `withdraw_signed` calls `require_auth_for_args` without `to`, `amount` in the signed arguments",
+      "help": "Include every amount and address that the call acts on in the `require_auth_for_args` arguments, or use `require_auth()` so the full invocation is signed.",
+      "location": {
+        "file": "fixtures/vulnerable-examples/missing-auth/src/lib.rs",
+        "start_line": 109,
+        "start_column": 14,
+        "end_line": 109,
+        "end_column": 35
+      },
+      "snippet": "        user.require_auth_for_args(vec![&env]); // expect: SG-001",
+      "function": "withdraw_signed",
+      "fingerprint": "ef1cdb03dae73b24",
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    }
+  ],
+  "parse_failures": [],
+  "rules": [
+    {
+      "id": "SG-001",
+      "name": "missing-authorization",
+      "summary": "Potential missing authorization check",
+      "description": "An exported contract function writes to storage, transfers tokens out of the contract, or upgrades the contract WASM, but neither it nor any helper it calls invokes `require_auth()` / `require_auth_for_args()` (or a recognised access-control helper or attribute). Anyone can call such a function with arbitrary arguments.",
+      "remediation": "Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.",
+      "severity": "warning",
+      "tags": [
+        "security",
+        "authorization",
+        "access-control"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md"
+    },
+    {
+      "id": "SG-002",
+      "name": "storage-tier-misuse",
+      "summary": "Suspicious storage type for application state",
+      "description": "Soroban has three storage tiers. Temporary entries are permanently deleted when their TTL expires and cannot be restored, so storing balances, admin addresses, configuration or other long-lived state there can silently lose funds or brick the contract. Instance storage is loaded on every invocation and shares one size-limited ledger entry, so writing per-user keys (e.g. `DataKey::Balance(addr)`) to it grows the entry without bound and raises costs for every caller.",
+      "remediation": "Keep long-lived state in `persistent()` (per-user data) or `instance()` (small contract-wide config) and extend its TTL; reserve `temporary()` for data that may safely disappear.",
+      "severity": "warning",
+      "tags": [
+        "security",
+        "storage",
+        "state"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-002.md"
+    },
+    {
+      "id": "SG-003",
+      "name": "unchecked-arithmetic",
+      "summary": "Unchecked arithmetic on token amounts",
+      "description": "Plain `+`, `-`, `*` (and their assignment forms) on values that look like token amounts or balances, and `as` casts of such values to a narrower integer type. In release builds without `overflow-checks = true`, integer overflow wraps silently, which can mint balances or bypass limits. `as` casts never check: `amount as u64` truncates and `amount as u128` turns negative amounts into huge positive ones.",
+      "remediation": "Use `checked_add` / `checked_sub` / `checked_mul` and handle `None`, set `overflow-checks = true` in `[profile.release]`, and replace `as` casts with `try_from`.",
+      "severity": "warning",
+      "tags": [
+        "security",
+        "arithmetic",
+        "overflow"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-003.md"
+    },
+    {
+      "id": "SG-004",
+      "name": "unbounded-iteration",
+      "summary": "Potentially unbounded iteration",
+      "description": "A loop or iterator chain walks a collection that is loaded from contract storage, or a collection / count supplied by the caller, without an upper bound check. Soroban transactions have hard CPU, memory and ledger-read limits. If a stored collection can grow without limit (for example, anyone can append to a list of users), the function will eventually exceed those limits and become permanently uncallable, which can lock funds. Caller-supplied sizes let a single caller force expensive work.",
+      "remediation": "Check `len()` (or the count) against a maximum before looping, paginate with `start`/`limit` arguments, or store each entry under its own key instead of one growing `Vec`/`Map`.",
+      "severity": "warning",
+      "tags": [
+        "security",
+        "denial-of-service",
+        "resource-limits"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-004.md"
+    },
+    {
+      "id": "SG-005",
+      "name": "unprotected-initializer",
+      "summary": "Initializer can be called more than once",
+      "description": "An exported function named like an initializer (`initialize`, `init`, …) writes contract state but never checks whether the contract has already been initialized. Because exported functions are callable by anyone, an attacker can call it again after deployment to replace the admin, token address or other configuration, or front-run the legitimate first call.",
+      "remediation": "Move initialization into `__constructor` (runs once at deployment), or fail when already initialized, e.g. `if env.storage().instance().has(&DataKey::Admin) { panic_with_error!(..) }`.",
+      "severity": "error",
+      "tags": [
+        "security",
+        "initialization",
+        "access-control"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-005.md"
+    },
+    {
+      "id": "SG-006",
+      "name": "negative-amount",
+      "summary": "Signed amount not checked for negative values",
+      "description": "Soroban token amounts are `i128`, so they can be negative. An exported function that writes an `i128` parameter into contract storage (balances, shares, debts, limits), directly or through helpers, without checking its sign lets a caller invert the operation: a negative mint burns, a negative deposit credits less than zero, a negative debt repayment borrows. Amounts that are also passed to an external token call are not reported, because token contracts reject negative amounts and the whole invocation fails.",
+      "remediation": "Reject negative (and usually zero) amounts before using them, e.g. `if amount <= 0 { panic_with_error!(&env, Error::InvalidAmount) }`, or use an unsigned type.",
+      "severity": "warning",
+      "tags": [
+        "security",
+        "input-validation",
+        "arithmetic"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-006.md"
+    },
+    {
+      "id": "SG-007",
+      "name": "missing-ttl-extension",
+      "summary": "Stored data never has its TTL extended",
+      "description": "Persistent and instance entries live only until their time-to-live (TTL) runs out; they are then archived and every call that reads them fails until someone restores them. A contract that writes persistent or instance storage but never calls `extend_ttl` on that tier (and never extends its instance with the deployer) relies on users or operators to extend or restore entries by hand. Archived instance storage makes the whole contract unusable until restored. Writes made only by `__constructor` or an initializer are not considered.",
+      "remediation": "Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions.",
+      "severity": "info",
+      "tags": [
+        "reliability",
+        "storage",
+        "state-archival"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md"
+    },
+    {
+      "id": "SG-008",
+      "name": "ignored-try-call",
+      "summary": "Result of a fallible cross-contract call is ignored",
+      "description": "Generated contract clients offer `try_*` variants (`client.try_transfer(..)`) that return a `Result` instead of aborting when the callee fails. Dropping that result (`client.try_transfer(..);` or `let _ = client.try_transfer(..);`) lets execution continue as if the call succeeded: tokens were not moved, a hook did not run, state was not updated, yet the caller records success.",
+      "remediation": "Use the non-`try_` method so a failure aborts the invocation, or handle the `Result` explicitly (`match client.try_transfer(..) { Ok(Ok(())) => .., _ => panic_with_error!(..) }`).",
+      "severity": "warning",
+      "tags": [
+        "security",
+        "error-handling",
+        "cross-contract"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-008.md"
+    },
+    {
+      "id": "SG-009",
+      "name": "weak-check-auth",
+      "summary": "Custom account `__check_auth` does not verify the signature",
+      "description": "A custom account contract authorizes every action taken on its behalf through `__check_auth(env, signature_payload, signatures, auth_contexts)`. If the implementation never uses the payload or the signatures, or never calls a signature-verification function (`ed25519_verify`, `secp256r1_verify`, `secp256k1_recover`, `bls12_381` checks) or delegates to another account's `require_auth`, then any transaction can spend the account's funds.",
+      "remediation": "Verify every signature against `signature_payload` (e.g. `env.crypto().ed25519_verify(&public_key, &signature_payload.into(), &signature)`) and check that the signer is authorized for each entry of `auth_contexts`.",
+      "severity": "error",
+      "tags": [
+        "security",
+        "authorization",
+        "account-abstraction"
+      ],
+      "help_uri": "https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-009.md"
+    }
+  ]
+}

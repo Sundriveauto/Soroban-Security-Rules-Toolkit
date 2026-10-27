@@ -1,0 +1,122 @@
+info[SG-007]: This contract writes persistent storage but never extends its TTL; entries will be archived when their TTL expires
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:33:10
+   |
+33 |         .set(&DataKey::Balance(user.clone()), &amount); // expect: SG-007
+   |          ^^^
+   |
+   = missing-ttl-extension (SG-007), confidence: medium, function: `write_balance`
+   = help: Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md
+
+warning[SG-001]: Exported function `withdraw` transfers tokens out of the contract without an authorization check
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:62:16
+   |
+62 |         client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001
+   |                ^^^^^^^^
+   |
+   = missing-authorization (SG-001), confidence: high, function: `withdraw`
+   = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+warning[SG-001]: Exported function `set_admin` modifies privileged configuration without an authorization check
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:67:34
+   |
+67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
+   |                                  ^^^
+   |
+   = missing-authorization (SG-001), confidence: high, function: `set_admin`
+   = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+info[SG-007]: This contract writes instance storage but never extends its TTL; entries will be archived when their TTL expires
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:67:34
+   |
+67 |         env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
+   |                                  ^^^
+   |
+   = missing-ttl-extension (SG-007), confidence: medium, function: `set_admin`
+   = help: Extend the TTL where entries are written or read, e.g. `env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO)` and `env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO)` in frequently called functions.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-007.md
+
+warning[SG-001]: Exported function `upgrade` upgrades the contract WASM without an authorization check
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:72:24
+   |
+72 |         env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = missing-authorization (SG-001), confidence: high, function: `upgrade`
+   = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+warning[SG-001]: Exported function `credit` writes contract storage (via `write_balance`) without an authorization check
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:77:9
+   |
+77 |         write_balance(&env, &user, amount); // expect: SG-001, SG-006
+   |         ^^^^^^^^^^^^^
+   |
+   = missing-authorization (SG-001), confidence: medium, function: `credit`
+   = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+warning[SG-006]: `credit` stores or accounts `amount: i128` without rejecting negative values
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:77:9
+   |
+77 |         write_balance(&env, &user, amount); // expect: SG-001, SG-006
+   |         ^^^^^^^^^^^^^
+   |
+   = negative-amount (SG-006), confidence: medium, function: `credit`
+   = help: Add `if amount <= 0 { panic_with_error!(..) }` (or `< 0` if zero is allowed) before using it.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-006.md
+
+warning[SG-001]: Exported function `set_token` writes contract storage without an authorization check
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:83:34
+   |
+83 |         env.storage().instance().set(&DataKey::Token, &token); // expect: SG-001
+   |                                  ^^^
+   |
+   = missing-authorization (SG-001), confidence: medium, function: `set_token`
+   = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+warning[SG-001]: Exported function `withdraw_to` transfers tokens out of the contract, but authorizes only on some code paths (inside a branch, loop or closure)
+  --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:92:16
+   |
+92 |         client.transfer(&env.current_contract_address(), &user, &amount); // expect: SG-001
+   |                ^^^^^^^^
+   |
+   = missing-authorization (SG-001), confidence: medium, function: `withdraw_to`
+   = help: Review whether this operation requires `address.require_auth()` (on the affected user or the stored admin). If the function is intentionally permissionless, add `// stellar-guard-ignore SG-001 -- <reason>`.
+   = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+warning[SG-001]: Exported function `move_balance` decreases a value keyed by `from`, but only `caller` authorizes
+   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:102:9
+    |
+102 |         write_balance(&env, &from, balance - amount); // expect: SG-001, SG-006
+    |         ^^^^^^^^^^^^^
+    |
+    = missing-authorization (SG-001), confidence: medium, function: `move_balance`
+    = help: Call `from.require_auth()` before debiting it, or check an allowance granted by `from` to the caller.
+    = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+warning[SG-006]: `move_balance` stores or accounts `amount: i128` without rejecting negative values
+   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:102:9
+    |
+102 |         write_balance(&env, &from, balance - amount); // expect: SG-001, SG-006
+    |         ^^^^^^^^^^^^^
+    |
+    = negative-amount (SG-006), confidence: medium, function: `move_balance`
+    = help: Add `if amount <= 0 { panic_with_error!(..) }` (or `< 0` if zero is allowed) before using it.
+    = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-006.md
+
+warning[SG-001]: Exported function `withdraw_signed` calls `require_auth_for_args` without `to`, `amount` in the signed arguments
+   --> fixtures/vulnerable-examples/missing-auth/src/lib.rs:109:14
+    |
+109 |         user.require_auth_for_args(vec![&env]); // expect: SG-001
+    |              ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = missing-authorization (SG-001), confidence: medium, function: `withdraw_signed`
+    = help: Include every amount and address that the call acts on in the `require_auth_for_args` arguments, or use `require_auth()` so the full invocation is signed.
+    = docs: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/blob/main/docs/rules/SG-001.md
+
+stellar-guard scanned 1 file with 9 rules: 0 errors, 10 warnings, 2 infos
+note: stellar-guard reports potential issues found by source-level heuristics. Findings are not proof of a vulnerability, and a clean scan does not prove a contract is secure.

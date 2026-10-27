@@ -23,6 +23,10 @@ cargo test --workspace
 
 The minimum supported Rust version is **1.88**; CI checks it.
 
+Report output is covered by golden files in `crates/guard-cli/tests/snapshots/`. After an intentional
+output change, regenerate them with `UPDATE_SNAPSHOTS=1 cargo test -p guard-cli --test snapshots`
+and review the diff.
+
 ## Project layout
 
 | Crate | Responsibility |

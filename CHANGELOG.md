@@ -43,6 +43,7 @@ are listed under **Changed**.
   signature not bound to `signature_payload`.
 - `scripts/seeded_bugs.py` recall check: 12 / 12 seeded bugs detected in soroban-examples (0.1.0:
   6 / 12). Real-world baseline updated in `docs/validation.md`.
+- Golden-file tests for every report format (text, JSON, SARIF, GitHub, Markdown).
 
 ## [0.1.0] - 2026-10-26
 
