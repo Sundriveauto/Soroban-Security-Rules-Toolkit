@@ -1,5 +1,5 @@
 [package]
-name = "guard-rules"
+name = "stellar-guard-rules"
 description = "Soroban security detection rules for stellar-guard"
 version.workspace = true
 edition.workspace = true

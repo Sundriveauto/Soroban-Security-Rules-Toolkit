@@ -23,6 +23,17 @@ you and credit you in the advisory unless you prefer otherwise.
 
 Security fixes are released for the latest minor version.
 
+## Verifying releases
+
+Release archives and container images are built by GitHub Actions from the tagged commit and carry
+signed [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)
+and a CycloneDX SBOM attestation:
+
+```sh
+gh attestation verify <archive> --repo petermuazu/Soroban-Security-Rules-Toolkit
+gh attestation verify oci://ghcr.io/petermuazu/stellar-guard:<version> --repo petermuazu/Soroban-Security-Rules-Toolkit
+```
+
 ## Vulnerabilities in your contracts
 
 If stellar-guard flags a real vulnerability in a deployed contract, follow that project's own

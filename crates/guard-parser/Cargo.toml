@@ -1,5 +1,5 @@
 [package]
-name = "guard-parser"
+name = "stellar-guard-parser"
 description = "Source discovery, parsing and semantic model for stellar-guard"
 version.workspace = true
 edition.workspace = true

@@ -1,5 +1,5 @@
 [package]
-name = "guard-engine"
+name = "stellar-guard-engine"
 description = "Rule engine, configuration and findings model for stellar-guard"
 version.workspace = true
 edition.workspace = true

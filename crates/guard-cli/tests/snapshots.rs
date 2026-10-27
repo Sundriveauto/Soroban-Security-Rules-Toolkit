@@ -5,7 +5,7 @@
 //! with a suppressed finding), then compared with `tests/snapshots/`.
 //!
 //! After an intentional output change, regenerate with:
-//! `UPDATE_SNAPSHOTS=1 cargo test -p guard-cli --test snapshots` and review the diff.
+//! `UPDATE_SNAPSHOTS=1 cargo test -p stellar-guard --test snapshots` and review the diff.
 
 use std::fs;
 use std::path::{Path, PathBuf};

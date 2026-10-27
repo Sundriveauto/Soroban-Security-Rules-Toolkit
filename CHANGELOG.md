@@ -9,6 +9,8 @@ are listed under **Changed**.
 
 ### Changed
 
+- Packages are renamed for crates.io: the CLI package is `stellar-guard` (was `guard-cli`; use
+  `-p stellar-guard`), libraries are `stellar-guard-*`. Rust import paths (`guard_engine`, …) are unchanged.
 - SG-001 no longer trusts a helper because of its name alone (`require_admin`, `check_owner_auth`, …)
   when the crate defines it: the helper's body must actually authorize. Names are still trusted for
   helpers defined outside the crate.
@@ -48,6 +50,11 @@ are listed under **Changed**.
 - `scripts/seeded_bugs.py` recall check: 12 / 12 seeded bugs detected in soroban-examples (0.1.0:
   6 / 12). Real-world baseline updated in `docs/validation.md`.
 - Golden-file tests for every report format (text, JSON, SARIF, GitHub, Markdown).
+- JSON Schema for the report (`docs/report.schema.json`), checked against real output in tests.
+- Distribution: crates are published as `stellar-guard` and `stellar-guard-{parser,engine,rules,reporters}`
+  (`cargo install stellar-guard`, `cargo binstall stellar-guard`); a static Docker image
+  (`ghcr.io/petermuazu/stellar-guard`); `stellar-guard` and `stellar-guard-docker` pre-commit hooks.
+- Releases carry signed build provenance and a CycloneDX SBOM for every archive and the image.
 
 ## [0.1.0] - 2026-10-26
 

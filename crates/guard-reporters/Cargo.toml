@@ -1,5 +1,5 @@
 [package]
-name = "guard-reporters"
+name = "stellar-guard-reporters"
 description = "Text, JSON, SARIF, GitHub and Markdown reporters for stellar-guard"
 version.workspace = true
 edition.workspace = true

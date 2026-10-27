@@ -22,16 +22,18 @@ keywords = ["soroban", "stellar", "security", "static-analysis", "smart-contract
 categories = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
-guard-parser = { path = "crates/guard-parser", version = "0.1.0" }
-guard-engine = { path = "crates/guard-engine", version = "0.1.0" }
-guard-rules = { path = "crates/guard-rules", version = "0.1.0" }
-guard-reporters = { path = "crates/guard-reporters", version = "0.1.0" }
+# Published as `stellar-guard-*`; imported under the short `guard_*` names.
+guard-parser = { path = "crates/guard-parser", version = "0.1.0", package = "stellar-guard-parser" }
+guard-engine = { path = "crates/guard-engine", version = "0.1.0", package = "stellar-guard-engine" }
+guard-rules = { path = "crates/guard-rules", version = "0.1.0", package = "stellar-guard-rules" }
+guard-reporters = { path = "crates/guard-reporters", version = "0.1.0", package = "stellar-guard-reporters" }
 
 syn = { version = "2.0", features = ["full", "visit", "visit-mut", "extra-traits"] }
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 quote = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+regex = "1"
 toml = "0.8"
 globset = "0.4"
 walkdir = "2.5"

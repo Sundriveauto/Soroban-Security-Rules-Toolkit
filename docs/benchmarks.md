@@ -6,7 +6,7 @@ synthetic projects by copying every fixture file into N separate Soroban crates,
 post-processing).
 
 ```sh
-cargo bench -p guard-cli
+cargo bench -p stellar-guard
 ```
 
 ## Results

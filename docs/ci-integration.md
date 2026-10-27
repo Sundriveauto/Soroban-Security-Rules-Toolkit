@@ -41,7 +41,7 @@ complete example is in [examples/stellar-guard.yml](examples/stellar-guard.yml).
 Install and run the binary; use the exit code.
 
 ```sh
-cargo install --locked --git https://github.com/petermuazu/Soroban-Security-Rules-Toolkit guard-cli
+cargo install --locked --git https://github.com/petermuazu/Soroban-Security-Rules-Toolkit stellar-guard
 stellar-guard scan contracts --fail-on warning --format sarif --output stellar-guard.sarif
 ```
 
@@ -51,12 +51,38 @@ GitLab CI example:
 stellar-guard:
   image: rust:1
   script:
-    - cargo install --locked --git https://github.com/petermuazu/Soroban-Security-Rules-Toolkit guard-cli
+    - cargo install --locked --git https://github.com/petermuazu/Soroban-Security-Rules-Toolkit stellar-guard
     - stellar-guard scan contracts --format json --output stellar-guard.json
   artifacts:
     when: always
     paths: [stellar-guard.json]
 ```
+
+## Docker
+
+The image `ghcr.io/petermuazu/stellar-guard` contains only the static binary (about 8 MB). Mount the
+project at `/src`:
+
+```sh
+docker run --rm -v "$PWD:/src" ghcr.io/petermuazu/stellar-guard scan . --format sarif -o stellar-guard.sarif
+```
+
+Images are tagged with the release version (`0.2.0`, `0.2`) and `latest`, and carry signed build
+provenance and an SBOM.
+
+## pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit
+    rev: v0.2.0
+    hooks:
+      - id: stellar-guard
+        args: [--fail-on, error]   # optional; extra arguments go after `stellar-guard scan`
+```
+
+`stellar-guard` needs the binary on `PATH`; `stellar-guard-docker` builds the image instead. Both
+scan the whole repository (respecting `stellar-guard.toml`) whenever a Rust file changes.
 
 ## Adopting on an existing codebase
 

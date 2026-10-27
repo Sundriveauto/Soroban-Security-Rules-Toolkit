@@ -95,6 +95,22 @@ jobs:
           ./target/release/stellar-guard scan fixtures --format json --fail-on never -q > b.json
           diff a.json b.json
 
+  package:
+    name: crates package and container build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish --workspace --dry-run --locked
+      - run: docker build -t stellar-guard:ci .
+      - name: Image scans the fixtures
+        run: |
+          docker run --rm -v "$PWD/fixtures:/src" stellar-guard:ci scan safe-contracts
+          set +e
+          docker run --rm -v "$PWD/fixtures:/src" stellar-guard:ci scan vulnerable-examples -q
+          test $? -eq 1
+
   action:
     name: GitHub Action
     runs-on: ubuntu-latest

@@ -5,7 +5,7 @@ on:
     tags: ["v*.*.*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +14,10 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +34,7 @@ jobs:
           targets: ${{ matrix.target }}
       - if: matrix.musl
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked --target ${{ matrix.target }} -p guard-cli
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p stellar-guard
       - name: Package
         shell: bash
         run: |
@@ -47,6 +51,12 @@ jobs:
             (cd dist && tar -czf "$name.tar.gz" "$name")
             (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           fi
+      # Signed SLSA build provenance: `gh attestation verify <archive> --repo <owner>/<repo>`.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -58,12 +68,28 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: SBOM (CycloneDX, from Cargo.lock)
+        run: |
+          cargo install --locked cargo-cyclonedx@0.5.7
+          cargo cyclonedx --format json --override-filename sbom
+          cp crates/guard-cli/sbom.json "dist/stellar-guard-${GITHUB_REF_NAME}.cdx.json"
+      - uses: actions/attest-sbom@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+          sbom-path: dist/stellar-guard-${{ github.ref_name }}.cdx.json
       - name: Extract release notes
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -73,3 +99,63 @@ jobs:
         with:
           body_path: notes.md
           files: dist/*
+
+  docker:
+    name: container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/stellar-guard
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/stellar-guard
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  crates:
+    name: publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Publishes the five crates in dependency order. Skipped until the repository
+      # has a CARGO_REGISTRY_TOKEN secret.
+      - name: cargo publish
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::notice::CARGO_REGISTRY_TOKEN is not set; skipping crates.io publish"
+            exit 0
+          fi
+          cargo publish --workspace --locked

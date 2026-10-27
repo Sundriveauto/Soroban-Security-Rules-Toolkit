@@ -10,7 +10,7 @@ git clone https://github.com/petermuazu/Soroban-Security-Rules-Toolkit
 cd Soroban-Security-Rules-Toolkit
 cargo test --workspace          # unit, fixture and CLI tests
 cargo run -- scan fixtures      # try the CLI (the workspace default binary is stellar-guard)
-cargo bench -p guard-cli        # scan benchmark
+cargo bench -p stellar-guard      # scan benchmark
 ```
 
 Before opening a pull request:
@@ -24,7 +24,7 @@ cargo test --workspace
 The minimum supported Rust version is **1.88**; CI checks it.
 
 Report output is covered by golden files in `crates/guard-cli/tests/snapshots/`. After an intentional
-output change, regenerate them with `UPDATE_SNAPSHOTS=1 cargo test -p guard-cli --test snapshots`
+output change, regenerate them with `UPDATE_SNAPSHOTS=1 cargo test -p stellar-guard --test snapshots`
 and review the diff.
 
 ## Project layout

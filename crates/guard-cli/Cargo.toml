@@ -1,5 +1,5 @@
 [package]
-name = "guard-cli"
+name = "stellar-guard"
 description = "stellar-guard: static security analysis for Soroban smart contracts"
 version.workspace = true
 edition.workspace = true
@@ -11,6 +11,16 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
+
+# `cargo binstall stellar-guard` downloads the release archive instead of compiling.
+# Linux archives are static musl builds; binstall falls back to them on gnu hosts.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/stellar-guard-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "stellar-guard-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [[bin]]
 name = "stellar-guard"
@@ -31,6 +41,7 @@ assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+regex.workspace = true
 
 [[bench]]
 name = "scan"

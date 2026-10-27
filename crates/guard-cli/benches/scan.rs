@@ -3,7 +3,7 @@
 //! Builds synthetic Soroban projects by replicating the fixture contracts,
 //! then measures a full scan (discovery, parsing, modelling, all rules).
 //!
-//! Run with `cargo bench -p guard-cli`.
+//! Run with `cargo bench -p stellar-guard`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

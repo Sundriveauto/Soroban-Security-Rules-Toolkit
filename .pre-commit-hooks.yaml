@@ -1,0 +1,19 @@
+# pre-commit hooks (https://pre-commit.com). See docs/ci-integration.md.
+
+# Uses an installed `stellar-guard` binary (cargo binstall / cargo install / release archive).
+- id: stellar-guard
+  name: stellar-guard
+  description: Static security analysis for Soroban smart contracts
+  entry: stellar-guard scan
+  language: system
+  types: [rust]
+  pass_filenames: false
+
+# Builds this repository's Dockerfile on first use; needs Docker but no Rust toolchain.
+- id: stellar-guard-docker
+  name: stellar-guard (docker)
+  description: Static security analysis for Soroban smart contracts, run in Docker
+  entry: /usr/local/bin/stellar-guard scan
+  language: docker
+  types: [rust]
+  pass_filenames: false

@@ -49,14 +49,37 @@ known false positives and false negatives. Recall is measured by seeding bugs in
 
 ## Install
 
-From source (Rust 1.88+):
+Prebuilt binary (Linux, macOS, Windows), from crates.io or with Docker (from v0.2.0):
 
 ```sh
-cargo install --locked --git https://github.com/petermuazu/Soroban-Security-Rules-Toolkit guard-cli
+cargo binstall stellar-guard                         # downloads the release binary
+cargo install --locked stellar-guard                 # builds from crates.io (Rust 1.88+)
+docker run --rm -v "$PWD:/src" ghcr.io/petermuazu/stellar-guard scan .
 ```
 
-Or download a prebuilt binary (Linux, macOS, Windows) from the
-[releases page](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/releases).
+Or from the latest source:
+
+```sh
+cargo install --locked --git https://github.com/petermuazu/Soroban-Security-Rules-Toolkit stellar-guard
+```
+
+Archives are on the [releases page](https://github.com/petermuazu/Soroban-Security-Rules-Toolkit/releases)
+with SHA-256 checksums, a CycloneDX SBOM and signed build provenance:
+
+```sh
+gh attestation verify stellar-guard-v0.2.0-x86_64-unknown-linux-musl.tar.gz \
+  --repo petermuazu/Soroban-Security-Rules-Toolkit
+```
+
+As a [pre-commit](https://pre-commit.com) hook:
+
+```yaml
+- repo: https://github.com/petermuazu/Soroban-Security-Rules-Toolkit
+  rev: v0.2.0
+  hooks:
+    - id: stellar-guard          # uses an installed binary
+    # - id: stellar-guard-docker # or builds the Docker image; no Rust toolchain needed
+```
 
 ## Usage
 
