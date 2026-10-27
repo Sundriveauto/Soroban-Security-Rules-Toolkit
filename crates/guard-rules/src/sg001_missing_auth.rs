@@ -36,7 +36,7 @@ admin). If the function is intentionally permissionless, add `// stellar-guard-i
 };
 
 /// Storage-key words that indicate privileged configuration.
-const PRIVILEGED_WORDS: &[&str] = &[
+pub(crate) const PRIVILEGED_WORDS: &[&str] = &[
     "admin",
     "administrator",
     "owner",
@@ -47,6 +47,8 @@ const PRIVILEGED_WORDS: &[&str] = &[
     "governor",
     "upgrader",
     "pauser",
+    "pause",
+    "paused",
     "guardian",
     "authority",
     "treasury",

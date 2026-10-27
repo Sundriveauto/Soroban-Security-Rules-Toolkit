@@ -64,12 +64,12 @@ impl Vault {
 
     /// Anyone can take over the contract.
     pub fn set_admin(env: Env, new_admin: Address) {
-        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007
+        env.storage().instance().set(&DataKey::Admin, &new_admin); // expect: SG-001, SG-007, SG-010
     }
 
     /// Anyone can replace the contract code.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001
+        env.deployer().update_current_contract_wasm(new_wasm_hash); // expect: SG-001, SG-010
     }
 
     /// Anyone can overwrite anyone's balance (write happens in a helper).

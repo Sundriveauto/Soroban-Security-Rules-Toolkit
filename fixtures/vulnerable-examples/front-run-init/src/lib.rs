@@ -20,7 +20,7 @@ impl Escrow {
             panic!("already initialized");
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Admin, &admin); // expect: SG-010
         env.storage().instance().set(&DataKey::Treasury, &treasury);
     }
 

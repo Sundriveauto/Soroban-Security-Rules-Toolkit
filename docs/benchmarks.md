@@ -2,7 +2,7 @@
 
 The benchmark in [`crates/guard-cli/benches/scan.rs`](../crates/guard-cli/benches/scan.rs) builds
 synthetic projects by copying every fixture file into N separate Soroban crates, then times a full
-`Engine::scan` (discovery, parsing, crate resolution, model building, all nine rules,
+`Engine::scan` (discovery, parsing, crate resolution, model building, all ten rules,
 post-processing).
 
 ```sh
